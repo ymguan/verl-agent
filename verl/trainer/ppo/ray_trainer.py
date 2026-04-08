@@ -94,6 +94,7 @@ class AdvantageEstimator(str, Enum):
     RLOO = "rloo"
     GRPO_PASSK = "grpo_passk"
     GiGPO = 'gigpo'
+    OCAR = 'ocar'
 
 
 @dataclass
@@ -357,6 +358,32 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             )
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
+    elif adv_estimator == AdvantageEstimator.OCAR:
+        from ocar.core_ocar import compute_ocar_outcome_advantage, compute_obs_surprise_from_prompt_logprobs
+        # Extract observation surprise from log probs (S_θ from actor, S_ref from reference)
+        obs_surprise_theta = compute_obs_surprise_from_prompt_logprobs(
+            data, tokenizer=None, model_key="old_log_probs"
+        )
+        obs_surprise_ref = None
+        if "ref_log_prob" in data.batch:
+            obs_surprise_ref = compute_obs_surprise_from_prompt_logprobs(
+                data, tokenizer=None, model_key="ref_log_prob"
+            )
+        ocar_tau = kwargs.get("ocar_tau", 1.0)
+        ocar_use_delta_s = kwargs.get("ocar_use_delta_s", True)
+        advantages, returns = compute_ocar_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            traj_index=data.non_tensor_batch["traj_uid"],
+            obs_surprise_theta=obs_surprise_theta,
+            obs_surprise_ref=obs_surprise_ref,
+            tau=ocar_tau,
+            use_delta_s=ocar_use_delta_s,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         raise NotImplementedError
     return data
@@ -451,7 +478,8 @@ class RayPPOTrainer:
             AdvantageEstimator.REMAX,
             AdvantageEstimator.RLOO,
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
-            AdvantageEstimator.GiGPO
+            AdvantageEstimator.GiGPO,
+            AdvantageEstimator.OCAR,
         ]:
             self.use_critic = False
         else:
@@ -1233,6 +1261,8 @@ class RayPPOTrainer:
                             gigpo_mode=self.config.algorithm.gigpo.mode,
                             gigpo_enable_similarity= self.config.algorithm.gigpo.enable_similarity,
                             gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
+                            ocar_tau=self.config.algorithm.ocar.tau if hasattr(self.config.algorithm, 'ocar') else 1.0,
+                            ocar_use_delta_s=self.config.algorithm.ocar.use_delta_s if hasattr(self.config.algorithm, 'ocar') else True,
                         )
 
                     # update critic

@@ -22,7 +22,7 @@ import torch
 import torchvision.transforms as T
 import ray
 
-from agent_system.environments.env_package.alfworld.alfworld.agents.environment import get_environment
+from alfworld.agents.environment import get_environment
 
 ALF_ACTION_LIST=["pass", "goto", "pick", "put", "open", "close", "toggle", "heat", "clean", "cool", "slice", "inventory", "examine", "look"]
 # ALF_ITEM_LIST =
@@ -66,7 +66,17 @@ class AlfworldWorker:
         """Execute a step in the environment"""
         actions = [action] 
         
-        obs, scores, dones, infos = self.env.step(actions)
+        try:
+            obs, scores, dones, infos = self.env.step(actions)
+        except (IndexError, Exception) as e:
+            # ALFWorld expert policy can crash on certain game states
+            # (e.g., empty objs_of_interest in handcoded_expert.py)
+            # Treat as a failed step: return "Nothing happens.", no score, done
+            obs = ["Nothing happens."]
+            scores = [0]
+            dones = [True]
+            infos = {'won': [False], 'admissible_commands': [[]], 'observation_text': obs}
+            return obs, scores, dones, infos
         infos['observation_text'] = obs
         return obs, scores, dones, infos
     
