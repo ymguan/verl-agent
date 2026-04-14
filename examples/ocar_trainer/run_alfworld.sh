@@ -94,7 +94,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name="ocar_tau${OCAR_TAU}_ds${OCAR_USE_DELTA_S}" \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
-    trainer.save_freq=5 \
+    trainer.save_freq=25 \
     trainer.test_freq=5 \
     trainer.total_epochs=$TOTAL_EPOCHS \
     trainer.val_before_train=True $@

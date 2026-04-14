@@ -132,28 +132,18 @@ def compute_ocar_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     compute_mean_std_cross_steps: bool = True,
+    weight_clip_min: float = 0.1,
+    weight_clip_max: float = 10.0,
 ):
     """Compute GRPO + OCAR advantage with per-step surprise reweighting.
 
     Step 1: Standard GRPO episode-level advantage (A_i)
-    Step 2: Per-step OCAR weights via surprise softmax
+    Step 2: Per-step OCAR weights via surprise softmax (clamped)
     Step 3: advantage_t = w_t × A_i (mean-preserving redistribution)
-
-    Args:
-        token_level_rewards: (bs, response_length)
-        response_mask: (bs, response_length)
-        index: (bs,) uid per sample
-        traj_index: (bs,) traj_uid per sample
-        obs_surprise_theta: (bs,) S_θ(o_t) from current model
-        obs_surprise_ref: (bs,) S_ref(o_t) from reference model (optional)
-        tau: softmax temperature (higher = more uniform)
-        use_delta_s: if True, uses ΔS = S_θ - S_ref
-        epsilon: numerical stability
-        norm_adv_by_std_in_grpo: GRPO normalization mode
-        compute_mean_std_cross_steps: GRPO grouping mode
 
     Returns:
         (advantages, returns) both of shape (bs, response_length)
+        Also stores detailed metrics in the returned tuple for logging.
     """
     # ── Step 1: GRPO episode-level advantage ──
     scores = token_level_rewards.sum(dim=-1)
@@ -215,16 +205,19 @@ def compute_ocar_outcome_advantage(
             continue  # all same → uniform
 
         if traj_adv > 0:
-            # Success: low surprise → high weight
             w = T * _softmax(-traj_s, temperature=tau)
         elif traj_adv < 0:
-            # Failure: high surprise → high blame
             w = T * _softmax(traj_s, temperature=tau)
         else:
             continue
 
         for j, idx in enumerate(indices):
             ocar_weights[idx] = w[j]
+
+    # ── Clamp weights to prevent extreme values ──
+    ocar_weights_raw = ocar_weights.copy()
+    ocar_weights = np.clip(ocar_weights, weight_clip_min, weight_clip_max)
+    n_clipped = int(np.sum(ocar_weights_raw != ocar_weights))
 
     # ── Step 4: Apply weights to episode advantage ──
     w_tensor = torch.tensor(ocar_weights, device=scores.device, dtype=scores.dtype)
@@ -233,10 +226,60 @@ def compute_ocar_outcome_advantage(
         weighted_adv = episode_adv * w_tensor
         advantages = weighted_adv.unsqueeze(-1) * response_mask
 
-    # Log stats
+    # ── Collect detailed metrics for wandb logging ──
+    ocar_metrics = {
+        "ocar/weight_mean": float(ocar_weights.mean()),
+        "ocar/weight_std": float(ocar_weights.std()),
+        "ocar/weight_min": float(ocar_weights.min()),
+        "ocar/weight_max": float(ocar_weights.max()),
+        "ocar/weight_clipped_count": n_clipped,
+        "ocar/surprise_theta_mean": float(obs_surprise_theta.mean()),
+        "ocar/surprise_theta_std": float(obs_surprise_theta.std()),
+        "ocar/delta_s_mean": float(surprise.mean()),
+        "ocar/delta_s_std": float(surprise.std()),
+        "ocar/delta_s_min": float(surprise.min()),
+        "ocar/delta_s_max": float(surprise.max()),
+    }
+    if obs_surprise_ref is not None:
+        ocar_metrics["ocar/surprise_ref_mean"] = float(obs_surprise_ref.mean())
+        ocar_metrics["ocar/surprise_ref_std"] = float(obs_surprise_ref.std())
+
+    # Per-trajectory summary for detailed logging
+    traj_summaries = []
+    for traj_id, indices in traj2indices.items():
+        indices = sorted(indices)
+        traj_reward = float(scores[indices[0]].item())
+        traj_success = traj_reward > 0
+        traj_summaries.append({
+            "traj_id": str(traj_id),
+            "n_steps": len(indices),
+            "success": traj_success,
+            "reward": traj_reward,
+            "s_theta_mean": float(np.mean([obs_surprise_theta[i] for i in indices])),
+            "s_ref_mean": float(np.mean([obs_surprise_ref[i] for i in indices])) if obs_surprise_ref is not None else 0.0,
+            "delta_s_mean": float(np.mean([surprise[i] for i in indices])),
+            "weight_mean": float(np.mean([ocar_weights[i] for i in indices])),
+            "weight_max": float(np.max([ocar_weights[i] for i in indices])),
+            "step_details": [
+                {
+                    "step_idx": j,
+                    "s_theta": float(obs_surprise_theta[idx]),
+                    "s_ref": float(obs_surprise_ref[idx]) if obs_surprise_ref is not None else 0.0,
+                    "delta_s": float(surprise[idx]),
+                    "weight": float(ocar_weights[idx]),
+                }
+                for j, idx in enumerate(indices)
+            ],
+        })
+
+    # Store metrics and summaries as module-level for the caller to retrieve
+    compute_ocar_outcome_advantage._last_metrics = ocar_metrics
+    compute_ocar_outcome_advantage._last_traj_summaries = traj_summaries
+
     logger.info(
         f"OCAR: weight mean={ocar_weights.mean():.3f} std={ocar_weights.std():.3f} "
-        f"min={ocar_weights.min():.3f} max={ocar_weights.max():.3f}"
+        f"min={ocar_weights.min():.3f} max={ocar_weights.max():.3f} "
+        f"clipped={n_clipped} | ΔS mean={surprise.mean():.4f} std={surprise.std():.4f}"
     )
 
     return advantages, advantages

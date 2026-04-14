@@ -384,6 +384,17 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+
+        # Store surprise arrays and OCAR metrics in data for later logging
+        data.non_tensor_batch["obs_surprise_theta"] = obs_surprise_theta
+        if obs_surprise_ref is not None:
+            data.non_tensor_batch["obs_surprise_ref"] = obs_surprise_ref
+        if hasattr(compute_ocar_outcome_advantage, '_last_metrics'):
+            if not hasattr(data, '_ocar_metrics'):
+                data._ocar_metrics = {}
+            data._ocar_metrics = compute_ocar_outcome_advantage._last_metrics
+        if hasattr(compute_ocar_outcome_advantage, '_last_traj_summaries'):
+            data._ocar_traj_summaries = compute_ocar_outcome_advantage._last_traj_summaries
     else:
         raise NotImplementedError
     return data
@@ -968,6 +979,92 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+    def _dump_ocar_trajectories(self, batch, timing_raw):
+        """Dump detailed OCAR trajectory cases alongside checkpoint for debugging.
+
+        Saves each trajectory's step-by-step: observation (anchor_obs), action (decoded response),
+        surprise_theta, surprise_ref, delta_s, ocar_weight, and episode reward.
+        This helps diagnose per-task-type issues (e.g., clean tasks underperforming).
+        """
+        import json as _json
+
+        local_global_step_folder = os.path.join(
+            self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
+        )
+        ocar_log_path = os.path.join(local_global_step_folder, "ocar_trajectories.json")
+
+        try:
+            traj_summaries = getattr(batch, '_ocar_traj_summaries', [])
+            if not traj_summaries:
+                return
+
+            # Decode prompts and responses for each step
+            prompts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+            responses = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+            traj_uids = batch.non_tensor_batch["traj_uid"]
+            anchor_obs = batch.non_tensor_batch.get("anchor_obs", [None] * len(prompts))
+            rewards_per_step = batch.non_tensor_batch.get("rewards", [0.0] * len(prompts))
+            episode_rewards = batch.non_tensor_batch.get("episode_rewards", [0.0] * len(prompts))
+            obs_surprise_theta = batch.non_tensor_batch.get("obs_surprise_theta", np.zeros(len(prompts)))
+            obs_surprise_ref = batch.non_tensor_batch.get("obs_surprise_ref", np.zeros(len(prompts)))
+
+            # Group by traj_uid
+            traj2rows = defaultdict(list)
+            for i in range(len(prompts)):
+                traj2rows[traj_uids[i]].append(i)
+
+            cases = []
+            for traj_id, rows in traj2rows.items():
+                rows = sorted(rows)
+                ep_reward = float(episode_rewards[rows[0]]) if rows else 0.0
+                success = ep_reward > 0
+
+                steps = []
+                for step_j, row_idx in enumerate(rows):
+                    obs_text = str(anchor_obs[row_idx]) if anchor_obs[row_idx] is not None else ""
+                    # Truncate long observations for readability
+                    if len(obs_text) > 500:
+                        obs_text = obs_text[:500] + "..."
+                    action_text = responses[row_idx][:300] if responses[row_idx] else ""
+
+                    steps.append({
+                        "step": step_j,
+                        "observation": obs_text,
+                        "action": action_text,
+                        "s_theta": round(float(obs_surprise_theta[row_idx]), 4),
+                        "s_ref": round(float(obs_surprise_ref[row_idx]), 4) if obs_surprise_ref is not None else 0.0,
+                        "delta_s": round(float(obs_surprise_theta[row_idx] - obs_surprise_ref[row_idx]), 4) if obs_surprise_ref is not None else 0.0,
+                        "step_reward": round(float(rewards_per_step[row_idx]), 4) if rewards_per_step[row_idx] is not None else 0.0,
+                    })
+
+                cases.append({
+                    "traj_id": str(traj_id),
+                    "n_steps": len(rows),
+                    "success": success,
+                    "episode_reward": round(ep_reward, 4),
+                    "steps": steps,
+                })
+
+            # Sort: failures first (more interesting for debugging), then by n_steps desc
+            cases.sort(key=lambda c: (c["success"], -c["n_steps"]))
+
+            # Save (limit to 20 trajectories to keep file size reasonable)
+            output = {
+                "global_step": self.global_steps,
+                "n_trajectories": len(cases),
+                "n_success": sum(1 for c in cases if c["success"]),
+                "n_failure": sum(1 for c in cases if not c["success"]),
+                "trajectories": cases[:20],
+            }
+
+            os.makedirs(local_global_step_folder, exist_ok=True)
+            with open(ocar_log_path, "w") as f:
+                _json.dump(output, f, indent=2, ensure_ascii=False)
+            print(f"OCAR trajectory cases saved to {ocar_log_path} ({len(cases[:20])} trajs)")
+
+        except Exception as e:
+            print(f"Warning: failed to dump OCAR trajectories: {e}")
+
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             return 0
@@ -1308,6 +1405,9 @@ class RayPPOTrainer:
                     if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
+                            # ── OCAR: dump trajectory cases alongside checkpoint ──
+                            if self.config.algorithm.adv_estimator == AdvantageEstimator.OCAR and hasattr(batch, '_ocar_traj_summaries'):
+                                self._dump_ocar_trajectories(batch, timing_raw)
 
                 # training metrics
                 metrics.update(
@@ -1316,6 +1416,9 @@ class RayPPOTrainer:
                         "training/epoch": epoch,
                     }
                 )
+                # ── OCAR: add surprise metrics to wandb ──
+                if self.config.algorithm.adv_estimator == AdvantageEstimator.OCAR and hasattr(batch, '_ocar_metrics'):
+                    metrics.update(batch._ocar_metrics)
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
