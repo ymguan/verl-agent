@@ -230,3 +230,78 @@ rm -rf /tmp/tmp*
 ### Q: `AssertionError: gen_batch size X does not match obs size Y`
 
 parquet 数据行数不匹配。确保脚本里有 `prepare` 步骤（当前脚本已包含）。
+
+---
+
+## 更新日志
+
+### v2 (2026-04-14) — 稳定性 + 可观测性
+
+**问题背景**: v1 训练在 step 120 达到 val 93%，但 step 125 后 KL 暴涨（0.3→4.0），response length 从 100 缩到 20，模型完全崩溃至 0%。根因是 OCAR softmax 在失败轨迹中给某些步分配了极端 blame weight（adv_min 飙到 -354），导致梯度爆炸。
+
+**修复**:
+
+1. **权重 clamp `[0.1, 10.0]`** (`ocar/core_ocar.py`)
+   - OCAR softmax 权重限制在 [0.1, 10.0] 范围内，防止极端值
+   - 新增 `weight_clip_min` / `weight_clip_max` 参数
+   - 记录 `ocar/weight_clipped_count`，过多说明 τ 太低需调大
+
+2. **Wandb 实时 surprise 监控** (`verl/trainer/ppo/ray_trainer.py`)
+   - 每个 training step 自动记录 13 个 OCAR 指标到 wandb：
+
+   | 指标 | 监控用途 |
+   |------|---------|
+   | `ocar/weight_{mean,std,min,max}` | 权重分布是否极端化 |
+   | `ocar/weight_clipped_count` | clamp 触发频率 |
+   | `ocar/surprise_theta_{mean,std}` | S_θ 趋势（模型 NLL） |
+   | `ocar/surprise_ref_{mean,std}` | S_ref baseline |
+   | `ocar/delta_s_{mean,std,min,max}` | ΔS 信号健康度 |
+
+   **预警规则**:
+   - `delta_s_std` 持续增大 → 信号发散，考虑提高 τ
+   - `weight_clipped_count` > 总步数 10% → τ 太小
+   - `surprise_theta_mean` 单调下降 + `response_length` 缩短 → 模型在学"少说少错"
+
+3. **Checkpoint 轨迹 case 保存** (`verl/trainer/ppo/ray_trainer.py`)
+   - 每次 `save_checkpoint` 时额外保存 `ocar_trajectories.json`
+   - 包含每条轨迹的逐步 observation、action、s_theta、s_ref、delta_s、reward
+   - 失败轨迹排前面，方便 debug
+   - 最多 20 条轨迹，文件大小可控
+
+   文件位置：
+   ```
+   checkpoints/.../global_step_100/
+   ├── actor/
+   ├── data.pt
+   └── ocar_trajectories.json   ← 新增
+   ```
+
+   查看方法：
+   ```bash
+   python3 -c "
+   import json
+   with open('checkpoints/.../global_step_100/ocar_trajectories.json') as f:
+       data = json.load(f)
+   print(f'Success: {data[\"n_success\"]}, Failure: {data[\"n_failure\"]}')
+   for t in data['trajectories'][:3]:
+       print(f'\\nTraj {t[\"traj_id\"][:8]} success={t[\"success\"]} steps={t[\"n_steps\"]}')
+       for s in t['steps'][:5]:
+           print(f'  step {s[\"step\"]}: ds={s[\"delta_s\"]:.4f} | {s[\"action\"][:60]}')
+   "
+   ```
+
+### v1 (2026-04-10) — 初始版本
+
+- OCAR advantage 计算 (`ocar/core_ocar.py`)
+- verl-agent 集成：`AdvantageEstimator.OCAR` 枚举 + `compute_advantage()` 分支
+- ΔS = S_θ - S_ref 去噪模式
+- ALFWorld 训练脚本 (`run_alfworld.sh`)
+
+**训练结果** (Qwen2.5-7B-Instruct, 4×A100):
+
+| Metric | 值 |
+|--------|:-:|
+| 初始 val/success_rate | 57.8% |
+| 最佳 val/success_rate | **93.0%** (step 120, epoch 70) |
+| Test set (valid_unseen) | **82.6% ± 2.8%** (step 100, 3 seeds) |
+| 崩溃点 | step 125 (KL loss 0.3→3.3，weight 极端化)
