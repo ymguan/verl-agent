@@ -1590,8 +1590,9 @@ class RayPPOTrainer:
                     if self.config.algorithm.get("observe_surprise_wm", False):
                         with _timer("wm_surprise", timing_raw):
                             from ocar.surprise_observer import compute_wm_surprise
-                            wm_s = compute_wm_surprise(batch, self.actor_rollout_wg, self.tokenizer)
-                            batch.non_tensor_batch["obs_wm_s"] = wm_s
+                            wm_A, wm_B = compute_wm_surprise(batch, self.actor_rollout_wg, self.tokenizer)
+                            batch.non_tensor_batch["obs_wm_s"] = wm_A
+                            batch.non_tensor_batch["obs_wm_s_B"] = wm_B
 
                     # Free full_log_probs to save memory (no longer needed after surprise computation)
                     for key in ["full_log_probs", "full_ref_log_probs", "step_entropys"]:
@@ -1719,7 +1720,7 @@ class RayPPOTrainer:
                             "obs_s_ref_mean", "obs_s_ref_sum",
                             "obs_delta_s_mean", "obs_delta_s_sum",
                             "obs_consecutive_s",
-                            "obs_wm_s",
+                            "obs_wm_s", "obs_wm_s_B",
                             "obs_step_entropy_mean", "obs_step_entropy_std",
                             "obs_step_entropy_min", "obs_step_entropy_max",
                         ]

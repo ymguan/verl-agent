@@ -248,8 +248,19 @@ def compute_surprise_variants(data) -> dict[str, np.ndarray]:
         return result
 
     attention_mask = data.batch["attention_mask"]
-    loss_mask = data.batch["loss_mask"]
     response_length = data.batch["responses"].shape[1]
+
+    # Synthesize loss_mask if not present (e.g., vllm rollout without multi-turn sglang).
+    # Convention: prompt tokens = obs (0), response tokens = action (1).
+    if "loss_mask" in data.batch:
+        loss_mask = data.batch["loss_mask"]
+    else:
+        seq_len = attention_mask.shape[1]
+        prompt_length = seq_len - response_length
+        loss_mask = torch.zeros_like(attention_mask)
+        loss_mask[:, prompt_length:] = 1
+        logger.info(f"observe_surprise: synthesized loss_mask from prompt/response split "
+                    f"(prompt_len={prompt_length}, response_len={response_length})")
 
     # ── Primary: last obs block only (current step's observation) ──
     s_theta_mean, s_theta_sum, n_tokens = _compute_obs_nll_last_block(
@@ -302,72 +313,28 @@ def compute_surprise_variants(data) -> dict[str, np.ndarray]:
     return result
 
 
-def compute_wm_surprise(batch, actor_rollout_wg, tokenizer) -> np.ndarray:
-    """Compute world-model style surprise: NLL(obs_t | action_{t-1}, obs_{t-1}).
-
-    For each trajectory step t > 0, constructs a minimal prompt from
-    (obs_{t-1}, action_{t-1}) and computes NLL of obs_t tokens.
-    This requires one extra forward pass.
+def _build_wm_batch(prompt_strs, target_strs, tokenizer):
+    """Tokenize prompt/target pairs and build padded tensors for forward pass.
 
     Args:
-        batch: DataProto training batch
-        actor_rollout_wg: actor worker group for forward pass
-        tokenizer: tokenizer for encoding/decoding
+        prompt_strs: list of prompt strings (context)
+        target_strs: list of target strings (to predict)
+        tokenizer: tokenizer
 
     Returns:
-        np.ndarray of shape (bs,) with world-model surprise per step
+        DataProto batch, response_mask, max_prompt_len, or None if empty
     """
     from verl import DataProto
 
-    traj_index = batch.non_tensor_batch["traj_uid"]
-    anchor_obs = batch.non_tensor_batch.get("anchor_obs", None)
-    if anchor_obs is None:
-        logger.warning("compute_wm_surprise: anchor_obs not available, returning zeros")
-        return np.zeros(len(traj_index), dtype=np.float64)
+    if not prompt_strs:
+        return None, None, None
 
-    bs = len(traj_index)
-    responses_decoded = tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-
-    # Group steps by trajectory
-    traj2indices = defaultdict(list)
-    for i in range(bs):
-        traj2indices[traj_index[i]].append(i)
-
-    # For each step t > 0, build (prev_obs + prev_action) -> curr_obs pair
-    wm_prompts = []
-    wm_targets = []
-    wm_step_indices = []
-
-    for _, indices in traj2indices.items():
-        indices = sorted(indices)
-        for j in range(1, len(indices)):
-            prev_idx = indices[j - 1]
-            curr_idx = indices[j]
-
-            prev_obs = str(anchor_obs[prev_idx]) if anchor_obs[prev_idx] is not None else ""
-            prev_action = responses_decoded[prev_idx]
-            curr_obs = str(anchor_obs[curr_idx]) if anchor_obs[curr_idx] is not None else ""
-
-            if not curr_obs:
-                continue
-
-            wm_prompts.append(f"{prev_obs}\n{prev_action}")
-            wm_targets.append(curr_obs)
-            wm_step_indices.append(curr_idx)
-
-    if not wm_prompts:
-        logger.warning("compute_wm_surprise: no valid WM pairs found")
-        return np.zeros(bs, dtype=np.float64)
-
-    # Tokenize and build a DataProto batch for forward pass
-    wm_surprise = np.zeros(bs, dtype=np.float64)
-
-    max_prompt_len = 0
-    max_target_len = 0
     prompt_ids_list = []
     target_ids_list = []
+    max_prompt_len = 0
+    max_target_len = 0
 
-    for prompt_str, target_str in zip(wm_prompts, wm_targets):
+    for prompt_str, target_str in zip(prompt_strs, target_strs):
         p_ids = tokenizer.encode(prompt_str, add_special_tokens=True)
         t_ids = tokenizer.encode(target_str, add_special_tokens=False)
         prompt_ids_list.append(p_ids)
@@ -375,10 +342,9 @@ def compute_wm_surprise(batch, actor_rollout_wg, tokenizer) -> np.ndarray:
         max_prompt_len = max(max_prompt_len, len(p_ids))
         max_target_len = max(max_target_len, len(t_ids))
 
-    # Pad and build tensors
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
     total_len = max_prompt_len + max_target_len
-    wm_bs = len(wm_prompts)
+    wm_bs = len(prompt_strs)
 
     input_ids = torch.full((wm_bs, total_len), pad_id, dtype=torch.long)
     attention_mask = torch.zeros((wm_bs, total_len), dtype=torch.long)
@@ -406,17 +372,103 @@ def compute_wm_surprise(batch, actor_rollout_wg, tokenizer) -> np.ndarray:
             "response_mask": response_mask,
         }
     )
+    return wm_batch, response_mask, max_prompt_len
 
+
+def _extract_nll_from_output(output, response_mask, step_indices, bs):
+    """Extract per-step mean NLL from forward pass output."""
+    result = np.zeros(bs, dtype=np.float64)
+    log_probs = output.batch["old_log_probs"]
+    wm_bs = log_probs.shape[0]
+    for i in range(wm_bs):
+        mask = response_mask[i].bool()
+        step_lp = log_probs[i][mask]
+        if len(step_lp) > 0:
+            result[step_indices[i]] = -step_lp.mean().item()
+    return result
+
+
+def compute_wm_surprise(batch, actor_rollout_wg, tokenizer) -> tuple[np.ndarray, np.ndarray]:
+    """Compute world-model surprise in two variants:
+      A) P(obs_{t+1} | obs_t, action_t)  — state+action context
+      B) P(obs_{t+1} | action_t)          — action-only context
+
+    For each trajectory step t > 0, constructs prompts and computes NLL.
+
+    Args:
+        batch: DataProto training batch
+        actor_rollout_wg: actor worker group for forward pass
+        tokenizer: tokenizer for encoding/decoding
+
+    Returns:
+        (wm_A, wm_B): each np.ndarray of shape (bs,)
+    """
+    traj_index = batch.non_tensor_batch["traj_uid"]
+    anchor_obs = batch.non_tensor_batch.get("anchor_obs", None)
+    bs = len(traj_index)
+    zeros = np.zeros(bs, dtype=np.float64)
+
+    if anchor_obs is None:
+        logger.warning("compute_wm_surprise: anchor_obs not available, returning zeros")
+        return zeros.copy(), zeros.copy()
+
+    responses_decoded = tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+
+    # Group steps by trajectory
+    traj2indices = defaultdict(list)
+    for i in range(bs):
+        traj2indices[traj_index[i]].append(i)
+
+    # Build pairs for both A and B
+    prompts_A, prompts_B, targets, step_indices = [], [], [], []
+
+    for _, indices in traj2indices.items():
+        indices = sorted(indices)
+        for j in range(1, len(indices)):
+            prev_idx = indices[j - 1]
+            curr_idx = indices[j]
+
+            prev_obs = str(anchor_obs[prev_idx]) if anchor_obs[prev_idx] is not None else ""
+            prev_action = responses_decoded[prev_idx]
+            curr_obs = str(anchor_obs[curr_idx]) if anchor_obs[curr_idx] is not None else ""
+
+            if not curr_obs:
+                continue
+
+            prompts_A.append(f"{prev_obs}\n{prev_action}")  # state + action
+            prompts_B.append(prev_action)                    # action only
+            targets.append(curr_obs)
+            step_indices.append(curr_idx)
+
+    if not prompts_A:
+        logger.warning("compute_wm_surprise: no valid WM pairs found")
+        return zeros.copy(), zeros.copy()
+
+    wm_A = zeros.copy()
+    wm_B = zeros.copy()
+
+    # Forward pass for A: P(obs_{t+1} | obs_t, action_t)
     try:
-        wm_output = actor_rollout_wg.compute_log_prob(wm_batch)
-        wm_log_probs = wm_output.batch["old_log_probs"]
-
-        for i in range(wm_bs):
-            mask = response_mask[i].bool()
-            step_lp = wm_log_probs[i][mask]
-            if len(step_lp) > 0:
-                wm_surprise[wm_step_indices[i]] = -step_lp.mean().item()
+        batch_A, rmask_A, _ = _build_wm_batch(prompts_A, targets, tokenizer)
+        if batch_A is not None:
+            out_A = actor_rollout_wg.compute_log_prob(batch_A)
+            wm_A = _extract_nll_from_output(out_A, rmask_A, step_indices, bs)
     except Exception as e:
-        logger.error(f"compute_wm_surprise forward pass failed: {e}")
+        logger.error(f"compute_wm_surprise (A) forward pass failed: {e}")
 
-    return wm_surprise
+    # Forward pass for B: P(obs_{t+1} | action_t)
+    try:
+        batch_B, rmask_B, _ = _build_wm_batch(prompts_B, targets, tokenizer)
+        if batch_B is not None:
+            out_B = actor_rollout_wg.compute_log_prob(batch_B)
+            wm_B = _extract_nll_from_output(out_B, rmask_B, step_indices, bs)
+    except Exception as e:
+        logger.error(f"compute_wm_surprise (B) forward pass failed: {e}")
+
+    logger.info(
+        f"WM surprise: A(s+a→s')={wm_A[wm_A>0].mean():.4f} "
+        f"B(a→s')={wm_B[wm_B>0].mean():.4f} "
+        f"A-B={((wm_A-wm_B)[wm_A>0]).mean():.4f}"
+    )
+
+    return wm_A, wm_B
