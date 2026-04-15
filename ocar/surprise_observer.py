@@ -97,25 +97,13 @@ def _compute_obs_nll_last_block(
         if start >= end:
             continue
 
-        # full_log_probs is shifted: position j in input_ids -> full_log_probs[:, j-1]
-        # For tokens at positions [start, end), their log probs are at [start-1, end-1)
-        # But we also need attention_mask=1 at those positions
-        flp_start = max(start - 1, 0)
-        flp_end = end - 1
-
-        if flp_start >= flp_end:
-            continue
-
-        # Build mask for valid obs tokens in this block
-        block_attn = attention_mask[i, start:end]  # attention_mask at token positions
-        # Map to full_log_probs indices: token at pos j -> flp at pos j-1
-        # So for tokens [start..end-1], flp indices are [start-1..end-2]
-        # But if start==0, token at pos 0 has no log prob (it's the first token)
+        # full_log_probs is shifted: token at position j -> full_log_probs[:, j-1]
+        # Token at position 0 has no log prob (first token), so skip it.
         if start == 0:
-            # Skip position 0 (no log prob for first token)
             block_attn = attention_mask[i, 1:end]
             flp_indices = torch.arange(0, end - 1)
         else:
+            block_attn = attention_mask[i, start:end]
             flp_indices = torch.arange(start - 1, end - 1)
 
         valid = block_attn.bool()

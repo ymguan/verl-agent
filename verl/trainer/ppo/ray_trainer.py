@@ -1192,6 +1192,7 @@ class RayPPOTrainer:
             delta_s_mean = batch.non_tensor_batch.get("obs_delta_s_mean", None)
             consecutive_s = batch.non_tensor_batch.get("obs_consecutive_s", np.zeros(len(prompts)))
             wm_s = batch.non_tensor_batch.get("obs_wm_s", None)
+            wm_s_B = batch.non_tensor_batch.get("obs_wm_s_B", None)
             ent_mean = batch.non_tensor_batch.get("obs_step_entropy_mean", np.zeros(len(prompts)))
             ent_std = batch.non_tensor_batch.get("obs_step_entropy_std", np.zeros(len(prompts)))
             ent_min = batch.non_tensor_batch.get("obs_step_entropy_min", np.zeros(len(prompts)))
@@ -1243,6 +1244,8 @@ class RayPPOTrainer:
                         step_data["delta_s_mean"] = round(float(delta_s_mean[row_idx]), 6)
                     if wm_s is not None:
                         step_data["wm_s"] = round(float(wm_s[row_idx]), 6)
+                    if wm_s_B is not None:
+                        step_data["wm_s_B"] = round(float(wm_s_B[row_idx]), 6)
 
                     steps.append(step_data)
 
@@ -1734,15 +1737,16 @@ class RayPPOTrainer:
                         traj_uids = batch.non_tensor_batch.get("traj_uid", np.array([]))
                         ep_rewards = batch.non_tensor_batch.get("episode_rewards", np.array([]))
                         s_theta = batch.non_tensor_batch.get("obs_s_theta_mean", np.array([]))
+                        ent_mean = batch.non_tensor_batch.get("obs_step_entropy_mean", np.array([]))
 
-                        if len(traj_uids) > 0 and len(s_theta) > 0 and len(ep_rewards) > 0:
-                            traj2rows = defaultdict(list)
+                        traj2rows = defaultdict(list)
+                        if len(traj_uids) > 0:
                             for i in range(len(traj_uids)):
                                 traj2rows[traj_uids[i]].append(i)
 
+                        if len(traj_uids) > 0 and len(s_theta) > 0 and len(ep_rewards) > 0:
                             success_s, failure_s = [], []
                             success_ent, failure_ent = [], []
-                            ent_mean = batch.non_tensor_batch.get("obs_step_entropy_mean", np.array([]))
 
                             for traj_id, rows in traj2rows.items():
                                 traj_reward = float(ep_rewards[rows[0]]) if len(ep_rewards) > rows[0] else 0.0

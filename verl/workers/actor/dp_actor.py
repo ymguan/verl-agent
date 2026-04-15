@@ -335,6 +335,8 @@ class DataParallelPPOActor(BasePPOActor):
             assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
+            if entropys is not None:
+                entropys = entropys[revert_indices]
             if full_log_probs_out is not None:
                 full_log_probs_out = full_log_probs_out[revert_indices]
 
