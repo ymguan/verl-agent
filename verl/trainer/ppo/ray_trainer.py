@@ -1793,8 +1793,9 @@ class RayPPOTrainer:
                                 task_data[detected]["s_theta"].extend([float(s_theta[r]) for r in rows])
                                 if len(ent_mean) > 0:
                                     task_data[detected]["entropy"].extend([float(ent_mean[r]) for r in rows])
-                                traj_reward = float(ep_rewards[rows[0]]) if len(ep_rewards) > rows[0] else 0.0
-                                task_data[detected]["rewards"].append(traj_reward)
+                                if len(ep_rewards) > 0:
+                                    traj_reward = float(ep_rewards[rows[0]]) if len(ep_rewards) > rows[0] else 0.0
+                                    task_data[detected]["rewards"].append(traj_reward)
 
                             for tname, d in task_data.items():
                                 if d["s_theta"]:
