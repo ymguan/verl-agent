@@ -691,9 +691,12 @@ class ActorRolloutRefWorker(Worker):
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             with adapter_ctx:
-                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                output, entropys, full_log_probs = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+            tensors = {"old_log_probs": output, "entropys": entropys}
+            if full_log_probs is not None:
+                tensors["full_log_probs"] = full_log_probs
             output = DataProto.from_dict(
-                tensors={"old_log_probs": output, "entropys": entropys},
+                tensors=tensors,
                 meta_info={"temperature": self.config.rollout.temperature},
             )
             output = self.ulysses_sharding_manager.postprocess_data(output)
@@ -733,8 +736,11 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
-            output = DataProto.from_dict(tensors={"ref_log_prob": output})
+            output, _, full_ref_log_probs = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            tensors = {"ref_log_prob": output}
+            if full_ref_log_probs is not None:
+                tensors["full_ref_log_probs"] = full_ref_log_probs
+            output = DataProto.from_dict(tensors=tensors)
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")

@@ -1185,9 +1185,11 @@ class RayPPOTrainer:
             step_rewards = batch.non_tensor_batch.get("rewards", [0.0] * len(prompts))
 
             # Surprise variants (computed by surprise_observer)
-            s_theta = batch.non_tensor_batch.get("obs_s_theta", np.zeros(len(prompts)))
-            s_ref = batch.non_tensor_batch.get("obs_s_ref", None)
-            delta_s = batch.non_tensor_batch.get("obs_delta_s", None)
+            s_theta_mean = batch.non_tensor_batch.get("obs_s_theta_mean", np.zeros(len(prompts)))
+            s_theta_sum = batch.non_tensor_batch.get("obs_s_theta_sum", np.zeros(len(prompts)))
+            n_tokens = batch.non_tensor_batch.get("obs_n_tokens", np.zeros(len(prompts)))
+            s_ref_mean = batch.non_tensor_batch.get("obs_s_ref_mean", None)
+            delta_s_mean = batch.non_tensor_batch.get("obs_delta_s_mean", None)
             consecutive_s = batch.non_tensor_batch.get("obs_consecutive_s", np.zeros(len(prompts)))
             wm_s = batch.non_tensor_batch.get("obs_wm_s", None)
             ent_mean = batch.non_tensor_batch.get("obs_step_entropy_mean", np.zeros(len(prompts)))
@@ -1224,7 +1226,9 @@ class RayPPOTrainer:
                         "step": step_j,
                         "observation": obs_text,
                         "action": action_text,
-                        "s_theta": round(float(s_theta[row_idx]), 6),
+                        "s_theta_mean": round(float(s_theta_mean[row_idx]), 6),
+                        "s_theta_sum": round(float(s_theta_sum[row_idx]), 6),
+                        "obs_n_tokens": int(n_tokens[row_idx]),
                         "consecutive_s": round(float(consecutive_s[row_idx]), 6),
                         "entropy_mean": round(float(ent_mean[row_idx]), 6),
                         "entropy_std": round(float(ent_std[row_idx]), 6),
@@ -1233,10 +1237,10 @@ class RayPPOTrainer:
                         "advantage": round(step_adv, 6),
                         "step_reward": round(float(step_rewards[row_idx]), 4) if step_rewards[row_idx] is not None else 0.0,
                     }
-                    if s_ref is not None:
-                        step_data["s_ref"] = round(float(s_ref[row_idx]), 6)
-                    if delta_s is not None:
-                        step_data["delta_s"] = round(float(delta_s[row_idx]), 6)
+                    if s_ref_mean is not None:
+                        step_data["s_ref_mean"] = round(float(s_ref_mean[row_idx]), 6)
+                    if delta_s_mean is not None:
+                        step_data["delta_s_mean"] = round(float(delta_s_mean[row_idx]), 6)
                     if wm_s is not None:
                         step_data["wm_s"] = round(float(wm_s[row_idx]), 6)
 
@@ -1471,6 +1475,9 @@ class RayPPOTrainer:
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
+                        # Request full sequence log probs for obs surprise computation
+                        if self.config.algorithm.get("observe_surprise", False):
+                            batch.meta_info["return_full_log_probs"] = True
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
@@ -1482,6 +1489,10 @@ class RayPPOTrainer:
                         if self.config.algorithm.get("observe_surprise", False):
                             batch.batch["step_entropys"] = entropys.clone()
                         old_log_prob.batch.pop("entropys")
+                        # Store full_log_probs for obs surprise before union (may be large)
+                        if "full_log_probs" in old_log_prob.batch:
+                            full_log_probs_actor = old_log_prob.batch.pop("full_log_probs")
+                            batch.batch["full_log_probs"] = full_log_probs_actor
                         batch = batch.union(old_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
@@ -1515,6 +1526,9 @@ class RayPPOTrainer:
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                            # Store full_ref_log_probs for obs surprise
+                            if "full_ref_log_probs" in ref_log_prob.batch:
+                                batch.batch["full_ref_log_probs"] = ref_log_prob.batch.pop("full_ref_log_probs")
                             batch = batch.union(ref_log_prob)
 
                     # compute values
@@ -1578,6 +1592,10 @@ class RayPPOTrainer:
                             from ocar.surprise_observer import compute_wm_surprise
                             wm_s = compute_wm_surprise(batch, self.actor_rollout_wg, self.tokenizer)
                             batch.non_tensor_batch["obs_wm_s"] = wm_s
+
+                    # Free full_log_probs to save memory (no longer needed after surprise computation)
+                    for key in ["full_log_probs", "full_ref_log_probs", "step_entropys"]:
+                        batch.batch.pop(key, None)
 
                     # update critic
                     if self.use_critic:
@@ -1696,8 +1714,13 @@ class RayPPOTrainer:
                 if self.config.algorithm.get("observe_surprise", False):
                     try:
                         observe_keys = [
-                            "obs_s_theta", "obs_s_ref", "obs_delta_s", "obs_consecutive_s",
-                            "obs_wm_s", "obs_step_entropy_mean", "obs_step_entropy_std",
+                            "obs_s_theta_mean", "obs_s_theta_sum", "obs_n_tokens",
+                            "obs_s_all_theta_mean", "obs_s_all_theta_sum", "obs_n_tokens_all",
+                            "obs_s_ref_mean", "obs_s_ref_sum",
+                            "obs_delta_s_mean", "obs_delta_s_sum",
+                            "obs_consecutive_s",
+                            "obs_wm_s",
+                            "obs_step_entropy_mean", "obs_step_entropy_std",
                             "obs_step_entropy_min", "obs_step_entropy_max",
                         ]
                         for key in observe_keys:
@@ -1709,7 +1732,7 @@ class RayPPOTrainer:
                         # Success vs failure breakdown
                         traj_uids = batch.non_tensor_batch.get("traj_uid", np.array([]))
                         ep_rewards = batch.non_tensor_batch.get("episode_rewards", np.array([]))
-                        s_theta = batch.non_tensor_batch.get("obs_s_theta", np.array([]))
+                        s_theta = batch.non_tensor_batch.get("obs_s_theta_mean", np.array([]))
 
                         if len(traj_uids) > 0 and len(s_theta) > 0 and len(ep_rewards) > 0:
                             traj2rows = defaultdict(list)

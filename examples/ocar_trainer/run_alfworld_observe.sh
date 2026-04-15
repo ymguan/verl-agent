@@ -17,6 +17,7 @@
 # ──────────────────────────────────────────────────────────────
 set -x
 ENGINE=${1:-vllm}
+shift 2>/dev/null || true
 export WANDB_API_KEY='07d67694ce977d4e8e96369367c00af9a0becb7c'
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export VLLM_USE_V1=1
@@ -45,6 +46,7 @@ python3 -m examples.data_preprocess.prepare \
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     +algorithm.observe_surprise=true \
+    +algorithm.observe_surprise_wm=true \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
     data.train_batch_size=$train_data_size \

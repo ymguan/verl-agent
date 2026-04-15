@@ -242,7 +242,7 @@ class MegatronPPOActor(BasePPOActor):
         # add empty cache after each compute
         torch.cuda.empty_cache()
 
-        return log_probs, entropys
+        return log_probs, entropys, None  # full_log_probs not supported in megatron
 
     def make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         """Make minibatch iterator for updating the actor

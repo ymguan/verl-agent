@@ -73,11 +73,13 @@ class DataParallelPPOActor(BasePPOActor):
         )
         self.device_name = get_device_name()
 
-    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False, return_full_log_probs=False) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
+            If return_full_log_probs=True, returns (entropy, log_probs, full_log_probs)
+                where full_log_probs is (bs, seq_len - 1) covering the full sequence.
         """
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -202,6 +204,8 @@ class DataParallelPPOActor(BasePPOActor):
                 if calculate_entropy:
                     entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                if return_full_log_probs:
+                    return entropy, log_probs, full_log_probs.squeeze(-1)[:, :-1]  # (bsz, seq_len - 1)
 
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
@@ -229,6 +233,14 @@ class DataParallelPPOActor(BasePPOActor):
                     if calculate_entropy:
                         entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
 
+            if return_full_log_probs:
+                # Non-rmpad path: full_log_probs not available without extra memory cost
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "return_full_log_probs=True but use_remove_padding=False. "
+                    "Full log probs only supported with rmpad. Returning None."
+                )
+                return entropy, log_probs, None
             return entropy, log_probs
 
     def _optimizer_step(self):
@@ -274,6 +286,7 @@ class DataParallelPPOActor(BasePPOActor):
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        return_full_log_probs = data.meta_info.get("return_full_log_probs", False)
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
@@ -292,11 +305,20 @@ class DataParallelPPOActor(BasePPOActor):
 
         log_probs_lst = []
         entropy_lst = []
+        full_log_probs_lst = []
         for micro_batch in micro_batches:
             if isinstance(micro_batch, DataProto):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature, calculate_entropy=calculate_entropy)
+                result = self._forward_micro_batch(micro_batch, temperature=temperature,
+                                                   calculate_entropy=calculate_entropy,
+                                                   return_full_log_probs=return_full_log_probs)
+                if return_full_log_probs:
+                    entropy, log_probs, full_lp = result
+                    if full_lp is not None:
+                        full_log_probs_lst.append(full_lp)
+                else:
+                    entropy, log_probs = result
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
@@ -305,13 +327,18 @@ class DataParallelPPOActor(BasePPOActor):
         entropys = None
         if calculate_entropy:
             entropys = torch.concat(entropy_lst, dim=0)
+        full_log_probs_out = None
+        if return_full_log_probs and full_log_probs_lst:
+            full_log_probs_out = torch.concat(full_log_probs_lst, dim=0)
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
             assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
+            if full_log_probs_out is not None:
+                full_log_probs_out = full_log_probs_out[revert_indices]
 
-        return log_probs, entropys
+        return log_probs, entropys, full_log_probs_out
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):

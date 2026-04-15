@@ -4,11 +4,21 @@ Surprise Observer: observation-only surprise computation for GRPO experiments.
 Computes multiple surprise signal variants WITHOUT modifying advantages.
 All signals are returned as numpy arrays for logging/analysis only.
 
+Surprise is computed from **true observation token NLL** using full_log_probs.
+Two granularities:
+  - "last": only the LAST obs block before the response (= current step's observation)
+  - "all": all non-action tokens (attention_mask=1 & loss_mask=0) across the full sequence
+
+Both mean and sum NLL are recorded alongside token counts so downstream
+analysis can study length effects.
+
 Variants:
-    - obs_s_theta: raw NLL from actor log probs
-    - obs_s_ref: raw NLL from reference model log probs
-    - obs_delta_s: S_theta - S_ref (denoised)
-    - obs_consecutive_s: S_theta[t] - S_theta[t-1] per trajectory
+    - obs_s_theta_{mean,sum}: last-obs-block NLL from actor (primary signal)
+    - obs_s_all_theta_{mean,sum}: all-obs NLL from actor (secondary)
+    - obs_s_ref_{mean,sum}: last-obs-block NLL from reference model
+    - obs_delta_s_{mean,sum}: S_theta - S_ref (denoised)
+    - obs_n_tokens / obs_n_tokens_all: token counts
+    - obs_consecutive_s: step-to-step surprise delta (mean-based)
     - obs_step_entropy_{mean,std,min,max}: action token entropy stats
 """
 import logging
@@ -20,24 +30,143 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def _compute_per_step_nll(log_probs: torch.Tensor, response_mask: torch.Tensor) -> np.ndarray:
-    """Compute mean negative log probability per step (batch row).
+def _find_last_obs_block(loss_mask_row: torch.Tensor, prompt_len: int) -> tuple[int, int]:
+    """Find the start and end of the last contiguous 0-block in loss_mask[:prompt_len].
+
+    In multi-turn sequences, loss_mask alternates between 0-blocks (obs/system)
+    and 1-blocks (action content). The last 0-block in the prompt is the current
+    step's observation + assistant prefix tokens.
 
     Args:
-        log_probs: (bs, response_length) token-level log probs
-        response_mask: (bs, response_length) mask for valid tokens
+        loss_mask_row: (seq_len,) loss mask for one sample
+        prompt_len: length of the prompt portion
 
     Returns:
-        np.ndarray of shape (bs,) with mean NLL per step
+        (start, end) indices into the full sequence, end is exclusive.
+        Returns (0, 0) if no valid block found.
     """
-    bs = log_probs.shape[0]
-    nlls = np.zeros(bs, dtype=np.float64)
+    # Scan backward from prompt_len - 1 to find the 0-block
+    prompt_mask = loss_mask_row[:prompt_len]
+
+    # Find end of last 0-block (should be prompt_len since prompt ends with 0s)
+    end = prompt_len
+
+    # Scan backward to find where this 0-block starts (first 1 going backward)
+    start = end
+    for j in range(end - 1, -1, -1):
+        if prompt_mask[j] == 1:
+            start = j + 1
+            break
+    else:
+        # All 0s in prompt (step 0: system + obs_0 + prefix)
+        start = 0
+
+    if start >= end:
+        return (0, 0)
+
+    return (start, end)
+
+
+def _compute_obs_nll_last_block(
+    full_log_probs: torch.Tensor,
+    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
+    response_length: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute per-step NLL using only the LAST obs block (current observation).
+
+    Args:
+        full_log_probs: (bs, seq_len - 1) full sequence log probs (shifted)
+        attention_mask: (bs, seq_len)
+        loss_mask: (bs, seq_len)
+        response_length: length of the response portion
+
+    Returns:
+        (nll_mean, nll_sum, n_tokens) each of shape (bs,)
+    """
+    bs, seq_len_minus1 = full_log_probs.shape
+    seq_len = seq_len_minus1 + 1
+    prompt_len = seq_len - response_length
+
+    nll_mean = np.zeros(bs, dtype=np.float64)
+    nll_sum = np.zeros(bs, dtype=np.float64)
+    n_tokens = np.zeros(bs, dtype=np.float64)
+
     for i in range(bs):
-        mask = response_mask[i].bool()
-        step_lp = log_probs[i][mask]
-        if len(step_lp) > 0:
-            nlls[i] = -step_lp.mean().item()
-    return nlls
+        start, end = _find_last_obs_block(loss_mask[i], prompt_len)
+        if start >= end:
+            continue
+
+        # full_log_probs is shifted: position j in input_ids -> full_log_probs[:, j-1]
+        # For tokens at positions [start, end), their log probs are at [start-1, end-1)
+        # But we also need attention_mask=1 at those positions
+        flp_start = max(start - 1, 0)
+        flp_end = end - 1
+
+        if flp_start >= flp_end:
+            continue
+
+        # Build mask for valid obs tokens in this block
+        block_attn = attention_mask[i, start:end]  # attention_mask at token positions
+        # Map to full_log_probs indices: token at pos j -> flp at pos j-1
+        # So for tokens [start..end-1], flp indices are [start-1..end-2]
+        # But if start==0, token at pos 0 has no log prob (it's the first token)
+        if start == 0:
+            # Skip position 0 (no log prob for first token)
+            block_attn = attention_mask[i, 1:end]
+            flp_indices = torch.arange(0, end - 1)
+        else:
+            flp_indices = torch.arange(start - 1, end - 1)
+
+        valid = block_attn.bool()
+        if not valid.any():
+            continue
+
+        obs_lp = full_log_probs[i, flp_indices[valid]]
+        n = obs_lp.numel()
+        s = -obs_lp.sum().item()
+        nll_mean[i] = s / n
+        nll_sum[i] = s
+        n_tokens[i] = n
+
+    return nll_mean, nll_sum, n_tokens
+
+
+def _compute_obs_nll_all(
+    full_log_probs: torch.Tensor,
+    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute per-step NLL over ALL non-action tokens in the sequence.
+
+    obs_mask = (attention_mask[:, 1:] == 1) & (loss_mask[:, 1:] == 0)
+
+    Args:
+        full_log_probs: (bs, seq_len - 1)
+        attention_mask: (bs, seq_len)
+        loss_mask: (bs, seq_len)
+
+    Returns:
+        (nll_mean, nll_sum, n_tokens) each of shape (bs,)
+    """
+    obs_mask = (attention_mask[:, 1:] == 1) & (loss_mask[:, 1:] == 0)
+
+    bs = full_log_probs.shape[0]
+    nll_mean = np.zeros(bs, dtype=np.float64)
+    nll_sum = np.zeros(bs, dtype=np.float64)
+    n_tokens = np.zeros(bs, dtype=np.float64)
+
+    for i in range(bs):
+        mask_i = obs_mask[i]
+        if mask_i.any():
+            obs_lp = full_log_probs[i][mask_i]
+            n = obs_lp.numel()
+            s = -obs_lp.sum().item()
+            nll_mean[i] = s / n
+            nll_sum[i] = s
+            n_tokens[i] = n
+
+    return nll_mean, nll_sum, n_tokens
 
 
 def _compute_consecutive_surprise(
@@ -48,13 +177,6 @@ def _compute_consecutive_surprise(
 
     For step t > 0: consecutive_s[t] = s_theta[t] - s_theta[t-1]
     For step t = 0: consecutive_s[t] = 0
-
-    Args:
-        s_theta: (bs,) raw surprise per step
-        traj_index: (bs,) trajectory uid per step
-
-    Returns:
-        np.ndarray of shape (bs,) with consecutive surprise delta
     """
     bs = len(s_theta)
     consecutive = np.zeros(bs, dtype=np.float64)
@@ -77,12 +199,7 @@ def _compute_entropy_stats(
 ) -> dict[str, np.ndarray]:
     """Compute per-step entropy statistics from token-level entropy.
 
-    Args:
-        entropys: (bs, response_length) token-level entropy
-        response_mask: (bs, response_length) mask
-
-    Returns:
-        dict with keys obs_step_entropy_{mean,std,min,max}, each (bs,)
+    Entropy is computed on action tokens (response_mask=1).
     """
     bs = entropys.shape[0]
     stats = {
@@ -107,46 +224,80 @@ def _compute_entropy_stats(
 def compute_surprise_variants(data) -> dict[str, np.ndarray]:
     """Compute all surprise signal variants from a training batch.
 
-    Uses data already available in the batch (old_log_probs, ref_log_prob,
-    step_entropys, response_mask, traj_uid). Does NOT modify advantages.
+    Uses full_log_probs (full sequence log probs) to compute true observation
+    token NLL. Two granularities:
+      - "last block": only the last obs block (current step's observation) — primary signal
+      - "all": all non-action tokens — secondary
 
     Args:
-        data: DataProto batch with tensor and non-tensor fields
+        data: DataProto batch with tensor and non-tensor fields.
+              Required: full_log_probs, attention_mask, loss_mask, traj_uid, responses.
+              Optional: full_ref_log_probs, step_entropys, response_mask.
 
     Returns:
         dict mapping signal names to (bs,) numpy arrays
     """
-    response_mask = data.batch["response_mask"]
     traj_index = data.non_tensor_batch["traj_uid"]
-
     result = {}
 
-    # Raw surprise from actor
-    s_theta = _compute_per_step_nll(data.batch["old_log_probs"], response_mask)
-    result["obs_s_theta"] = s_theta
+    if "full_log_probs" not in data.batch:
+        logger.warning(
+            "observe_surprise: full_log_probs not available. "
+            "Ensure return_full_log_probs=True is set in meta_info."
+        )
+        return result
 
-    # Raw surprise from reference model
-    if "ref_log_prob" in data.batch:
-        s_ref = _compute_per_step_nll(data.batch["ref_log_prob"], response_mask)
-        result["obs_s_ref"] = s_ref
-        result["obs_delta_s"] = s_theta - s_ref
+    attention_mask = data.batch["attention_mask"]
+    loss_mask = data.batch["loss_mask"]
+    response_length = data.batch["responses"].shape[1]
+
+    # ── Primary: last obs block only (current step's observation) ──
+    s_theta_mean, s_theta_sum, n_tokens = _compute_obs_nll_last_block(
+        data.batch["full_log_probs"], attention_mask, loss_mask, response_length
+    )
+    result["obs_s_theta_mean"] = s_theta_mean
+    result["obs_s_theta_sum"] = s_theta_sum
+    result["obs_n_tokens"] = n_tokens
+
+    # ── Secondary: all obs tokens ──
+    s_all_mean, s_all_sum, n_all = _compute_obs_nll_all(
+        data.batch["full_log_probs"], attention_mask, loss_mask
+    )
+    result["obs_s_all_theta_mean"] = s_all_mean
+    result["obs_s_all_theta_sum"] = s_all_sum
+    result["obs_n_tokens_all"] = n_all
+
+    # ── Ref model surprise (last block) ──
+    if "full_ref_log_probs" in data.batch:
+        s_ref_mean, s_ref_sum, _ = _compute_obs_nll_last_block(
+            data.batch["full_ref_log_probs"], attention_mask, loss_mask, response_length
+        )
+        result["obs_s_ref_mean"] = s_ref_mean
+        result["obs_s_ref_sum"] = s_ref_sum
+        result["obs_delta_s_mean"] = s_theta_mean - s_ref_mean
+        result["obs_delta_s_sum"] = s_theta_sum - s_ref_sum
     else:
-        logger.warning("observe_surprise: ref_log_prob not available, skipping delta_s and s_ref")
+        logger.warning("observe_surprise: full_ref_log_probs not available, skipping ref/delta_s")
 
-    # Consecutive surprise (step-to-step delta)
-    result["obs_consecutive_s"] = _compute_consecutive_surprise(s_theta, traj_index)
+    # ── Consecutive surprise (step-to-step delta, based on mean NLL) ──
+    result["obs_consecutive_s"] = _compute_consecutive_surprise(s_theta_mean, traj_index)
 
-    # Per-step entropy stats
+    logger.info(
+        f"Surprise observer: "
+        f"s_theta_last_mean={s_theta_mean.mean():.4f}±{s_theta_mean.std():.4f} "
+        f"(n_tokens={n_tokens.mean():.0f}) | "
+        f"s_theta_all_mean={s_all_mean.mean():.4f} "
+        f"(n_tokens_all={n_all.mean():.0f}) | "
+        f"consecutive={result['obs_consecutive_s'].mean():.4f}"
+    )
+
+    # ── Per-step entropy stats (on action tokens) ──
     if "step_entropys" in data.batch:
+        response_mask = data.batch["response_mask"]
         entropy_stats = _compute_entropy_stats(data.batch["step_entropys"], response_mask)
         result.update(entropy_stats)
     else:
         logger.warning("observe_surprise: step_entropys not available, skipping entropy stats")
-
-    logger.info(
-        f"Surprise observer: s_theta mean={s_theta.mean():.4f} std={s_theta.std():.4f} | "
-        f"consecutive mean={result['obs_consecutive_s'].mean():.4f}"
-    )
 
     return result
 
@@ -183,9 +334,9 @@ def compute_wm_surprise(batch, actor_rollout_wg, tokenizer) -> np.ndarray:
         traj2indices[traj_index[i]].append(i)
 
     # For each step t > 0, build (prev_obs + prev_action) -> curr_obs pair
-    wm_prompts = []  # list of prompt strings
-    wm_targets = []  # list of target strings (current obs)
-    wm_step_indices = []  # which original batch index this corresponds to
+    wm_prompts = []
+    wm_targets = []
+    wm_step_indices = []
 
     for _, indices in traj2indices.items():
         indices = sorted(indices)
@@ -239,7 +390,6 @@ def compute_wm_surprise(batch, actor_rollout_wg, tokenizer) -> np.ndarray:
         t_len = len(target_ids_list[i])
         seq_len = p_len + t_len
 
-        # Left-pad prompt, then target
         offset = max_prompt_len - p_len
         input_ids[i, offset:offset + p_len] = torch.tensor(prompt_ids_list[i])
         input_ids[i, max_prompt_len:max_prompt_len + t_len] = torch.tensor(target_ids_list[i])
@@ -247,7 +397,6 @@ def compute_wm_surprise(batch, actor_rollout_wg, tokenizer) -> np.ndarray:
         position_ids[i, offset:max_prompt_len + t_len] = torch.arange(seq_len)
         response_mask[i, :t_len] = 1.0
 
-    # Build DataProto
     wm_batch = DataProto.from_dict(
         tensors={
             "input_ids": input_ids,
@@ -260,7 +409,7 @@ def compute_wm_surprise(batch, actor_rollout_wg, tokenizer) -> np.ndarray:
 
     try:
         wm_output = actor_rollout_wg.compute_log_prob(wm_batch)
-        wm_log_probs = wm_output.batch["old_log_probs"]  # (wm_bs, max_target_len)
+        wm_log_probs = wm_output.batch["old_log_probs"]
 
         for i in range(wm_bs):
             mask = response_mask[i].bool()
