@@ -298,6 +298,13 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+
+        # Observational surprise logging (does NOT modify advantages)
+        if kwargs.get("observe_surprise", False):
+            from ocar.surprise_observer import compute_surprise_variants
+            surprise_data = compute_surprise_variants(data)
+            data.non_tensor_batch.update(surprise_data)
+
     elif adv_estimator == AdvantageEstimator.GRPO_PASSK:
         advantages, returns = core_algos.compute_grpo_passk_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -385,16 +392,10 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
 
-        # Store surprise arrays and OCAR metrics in data for later logging
+        # Store surprise arrays in data for checkpoint trajectory logging
         data.non_tensor_batch["obs_surprise_theta"] = obs_surprise_theta
         if obs_surprise_ref is not None:
             data.non_tensor_batch["obs_surprise_ref"] = obs_surprise_ref
-        if hasattr(compute_ocar_outcome_advantage, '_last_metrics'):
-            if not hasattr(data, '_ocar_metrics'):
-                data._ocar_metrics = {}
-            data._ocar_metrics = compute_ocar_outcome_advantage._last_metrics
-        if hasattr(compute_ocar_outcome_advantage, '_last_traj_summaries'):
-            data._ocar_traj_summaries = compute_ocar_outcome_advantage._last_traj_summaries
     else:
         raise NotImplementedError
     return data
@@ -982,11 +983,15 @@ class RayPPOTrainer:
     def _dump_ocar_trajectories(self, batch, timing_raw):
         """Dump detailed OCAR trajectory cases alongside checkpoint for debugging.
 
-        Saves each trajectory's step-by-step: observation (anchor_obs), action (decoded response),
-        surprise_theta, surprise_ref, delta_s, ocar_weight, and episode reward.
-        This helps diagnose per-task-type issues (e.g., clean tasks underperforming).
+        Saves COMPLETE trajectories with:
+        - Full observation text (no truncation)
+        - Full action/think text (no truncation)
+        - Per-step: s_theta, s_ref, delta_s, ocar_weight, step_reward
+        - Per-trajectory: episode_advantage, task_description, task_type
+        - Episode-level: reward, success, n_steps
         """
         import json as _json
+        import re as _re
 
         local_global_step_folder = os.path.join(
             self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
@@ -994,11 +999,7 @@ class RayPPOTrainer:
         ocar_log_path = os.path.join(local_global_step_folder, "ocar_trajectories.json")
 
         try:
-            traj_summaries = getattr(batch, '_ocar_traj_summaries', [])
-            if not traj_summaries:
-                return
-
-            # Decode prompts and responses for each step
+            # Decode prompts and responses
             prompts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
             responses = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
             traj_uids = batch.non_tensor_batch["traj_uid"]
@@ -1008,10 +1009,53 @@ class RayPPOTrainer:
             obs_surprise_theta = batch.non_tensor_batch.get("obs_surprise_theta", np.zeros(len(prompts)))
             obs_surprise_ref = batch.non_tensor_batch.get("obs_surprise_ref", np.zeros(len(prompts)))
 
+            # Get advantages (already computed, stored in batch)
+            advantages_tensor = batch.batch.get("advantages", None)
+            response_mask = batch.batch.get("response_mask", None)
+
+            # Get OCAR per-step weights from the last computation
+            from ocar.core_ocar import compute_ocar_outcome_advantage as _ocar_fn
+            traj_summaries = getattr(_ocar_fn, '_last_traj_summaries', [])
+
+            # Build a traj_id -> weight map from summaries
+            traj_weight_map = {}
+            for ts in traj_summaries:
+                w_map = {}
+                for sd in ts.get("step_details", []):
+                    w_map[sd["step_idx"]] = sd["weight"]
+                traj_weight_map[ts["traj_id"]] = w_map
+
             # Group by traj_uid
             traj2rows = defaultdict(list)
             for i in range(len(prompts)):
                 traj2rows[traj_uids[i]].append(i)
+
+            # Task type detection from observation text
+            TASK_TYPES = {
+                "pick_and_place": ["put", "place"],
+                "pick_two_obj_and_place": ["two", "both"],
+                "look_at_obj_in_light": ["examine", "lamp", "light", "desklamp"],
+                "pick_heat_then_place_in_recep": ["heat", "microwave"],
+                "pick_cool_then_place_in_recep": ["cool", "fridge", "cold"],
+                "pick_clean_then_place_in_recep": ["clean", "sinkbasin", "wash"],
+            }
+
+            def detect_task_type(obs_text):
+                obs_lower = obs_text.lower()
+                # check specific types first (before generic pick_and_place)
+                for ttype in ["pick_two_obj_and_place", "look_at_obj_in_light",
+                              "pick_heat_then_place_in_recep", "pick_cool_then_place_in_recep",
+                              "pick_clean_then_place_in_recep", "pick_and_place"]:
+                    for kw in TASK_TYPES[ttype]:
+                        if kw in obs_lower:
+                            return ttype
+                return "unknown"
+
+            def extract_task_desc(obs_text):
+                match = _re.search(r"Your task is to:\s*(.+?)(?:\n|$)", obs_text)
+                if match:
+                    return match.group(1).strip()
+                return ""
 
             cases = []
             for traj_id, rows in traj2rows.items():
@@ -1019,23 +1063,184 @@ class RayPPOTrainer:
                 ep_reward = float(episode_rewards[rows[0]]) if rows else 0.0
                 success = ep_reward > 0
 
+                # Extract task description and type from the first step's prompt
+                first_prompt = prompts[rows[0]] if rows else ""
+                first_obs = str(anchor_obs[rows[0]]) if rows and anchor_obs[rows[0]] is not None else ""
+                task_desc = extract_task_desc(first_prompt) or extract_task_desc(first_obs)
+                task_type = detect_task_type(task_desc or first_prompt or first_obs)
+
+                # Compute per-step advantage (sum over response tokens)
+                step_advantages = []
+                weight_map = traj_weight_map.get(str(traj_id), {})
+
+                # Episode-level advantage (same for all steps in this traj)
+                # = the GRPO normalized score before OCAR reweighting
+                # We can approximate from advantages / weight
+                episode_adv_value = None
+
                 steps = []
                 for step_j, row_idx in enumerate(rows):
+                    # Full observation — NO truncation
                     obs_text = str(anchor_obs[row_idx]) if anchor_obs[row_idx] is not None else ""
-                    # Truncate long observations for readability
-                    if len(obs_text) > 500:
-                        obs_text = obs_text[:500] + "..."
-                    action_text = responses[row_idx][:300] if responses[row_idx] else ""
+                    # Full action/think — NO truncation
+                    action_text = responses[row_idx] if responses[row_idx] else ""
+
+                    # Per-step advantage (sum of token-level advantages)
+                    step_adv = 0.0
+                    if advantages_tensor is not None and response_mask is not None:
+                        mask = response_mask[row_idx]
+                        adv = advantages_tensor[row_idx]
+                        step_adv = float((adv * mask).sum().item())
+
+                    # OCAR weight for this step
+                    ocar_weight = weight_map.get(step_j, 1.0)
+
+                    # Estimate episode advantage from step_adv / ocar_weight
+                    if ocar_weight > 0.01 and episode_adv_value is None:
+                        episode_adv_value = step_adv / ocar_weight
+
+                    s_theta_val = float(obs_surprise_theta[row_idx])
+                    s_ref_val = float(obs_surprise_ref[row_idx]) if obs_surprise_ref is not None else 0.0
 
                     steps.append({
                         "step": step_j,
                         "observation": obs_text,
                         "action": action_text,
-                        "s_theta": round(float(obs_surprise_theta[row_idx]), 4),
-                        "s_ref": round(float(obs_surprise_ref[row_idx]), 4) if obs_surprise_ref is not None else 0.0,
-                        "delta_s": round(float(obs_surprise_theta[row_idx] - obs_surprise_ref[row_idx]), 4) if obs_surprise_ref is not None else 0.0,
+                        "s_theta": round(s_theta_val, 6),
+                        "s_ref": round(s_ref_val, 6),
+                        "delta_s": round(s_theta_val - s_ref_val, 6),
+                        "ocar_weight": round(ocar_weight, 4),
+                        "step_advantage": round(step_adv, 6),
                         "step_reward": round(float(rewards_per_step[row_idx]), 4) if rewards_per_step[row_idx] is not None else 0.0,
                     })
+
+                cases.append({
+                    "traj_id": str(traj_id),
+                    "task_description": task_desc,
+                    "task_type": task_type,
+                    "n_steps": len(rows),
+                    "success": success,
+                    "episode_reward": round(ep_reward, 4),
+                    "episode_advantage": round(episode_adv_value, 6) if episode_adv_value is not None else None,
+                    "steps": steps,
+                })
+
+            # Sort: failures first, then by n_steps desc
+            cases.sort(key=lambda c: (c["success"], -c["n_steps"]))
+
+            # Save ALL trajectories (no limit — full data for analysis)
+            output = {
+                "global_step": self.global_steps,
+                "n_trajectories": len(cases),
+                "n_success": sum(1 for c in cases if c["success"]),
+                "n_failure": sum(1 for c in cases if not c["success"]),
+                "task_type_summary": {},
+                "trajectories": cases,
+            }
+
+            # Task type summary
+            from collections import Counter
+            type_counts = Counter()
+            type_success = Counter()
+            for c in cases:
+                type_counts[c["task_type"]] += 1
+                if c["success"]:
+                    type_success[c["task_type"]] += 1
+            for tt in type_counts:
+                output["task_type_summary"][tt] = {
+                    "count": type_counts[tt],
+                    "success": type_success[tt],
+                    "success_rate": round(type_success[tt] / type_counts[tt], 4) if type_counts[tt] > 0 else 0,
+                }
+
+            os.makedirs(local_global_step_folder, exist_ok=True)
+            with open(ocar_log_path, "w") as f:
+                _json.dump(output, f, indent=2, ensure_ascii=False)
+            print(f"OCAR trajectories saved: {ocar_log_path} "
+                  f"({len(cases)} trajs, {output['n_success']} success, {output['n_failure']} failure)")
+
+        except Exception as e:
+            import traceback
+            print(f"Warning: failed to dump OCAR trajectories: {e}")
+            traceback.print_exc()
+
+    def _dump_observe_trajectories(self, batch):
+        """Dump trajectory cases with all surprise variants and entropy for observe mode.
+
+        Saves per-step: observation, action, all surprise signals, entropy stats, reward.
+        """
+        import json as _json
+
+        local_global_step_folder = os.path.join(
+            self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
+        )
+        log_path = os.path.join(local_global_step_folder, "observe_trajectories.json")
+
+        try:
+            prompts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+            responses = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+            traj_uids = batch.non_tensor_batch["traj_uid"]
+            anchor_obs = batch.non_tensor_batch.get("anchor_obs", [None] * len(prompts))
+            ep_rewards = batch.non_tensor_batch.get("episode_rewards", [0.0] * len(prompts))
+            step_rewards = batch.non_tensor_batch.get("rewards", [0.0] * len(prompts))
+
+            # Surprise variants (computed by surprise_observer)
+            s_theta = batch.non_tensor_batch.get("obs_s_theta", np.zeros(len(prompts)))
+            s_ref = batch.non_tensor_batch.get("obs_s_ref", None)
+            delta_s = batch.non_tensor_batch.get("obs_delta_s", None)
+            consecutive_s = batch.non_tensor_batch.get("obs_consecutive_s", np.zeros(len(prompts)))
+            wm_s = batch.non_tensor_batch.get("obs_wm_s", None)
+            ent_mean = batch.non_tensor_batch.get("obs_step_entropy_mean", np.zeros(len(prompts)))
+            ent_std = batch.non_tensor_batch.get("obs_step_entropy_std", np.zeros(len(prompts)))
+            ent_min = batch.non_tensor_batch.get("obs_step_entropy_min", np.zeros(len(prompts)))
+            ent_max = batch.non_tensor_batch.get("obs_step_entropy_max", np.zeros(len(prompts)))
+
+            advantages_tensor = batch.batch.get("advantages", None)
+            response_mask = batch.batch.get("response_mask", None)
+
+            # Group by trajectory
+            traj2rows = defaultdict(list)
+            for i in range(len(prompts)):
+                traj2rows[traj_uids[i]].append(i)
+
+            cases = []
+            for traj_id, rows in traj2rows.items():
+                rows = sorted(rows)
+                ep_reward = float(ep_rewards[rows[0]]) if ep_rewards[rows[0]] is not None else 0.0
+                success = ep_reward > 0
+
+                steps = []
+                for step_j, row_idx in enumerate(rows):
+                    obs_text = str(anchor_obs[row_idx]) if anchor_obs[row_idx] is not None else ""
+                    action_text = responses[row_idx] if responses[row_idx] else ""
+
+                    step_adv = 0.0
+                    if advantages_tensor is not None and response_mask is not None:
+                        mask = response_mask[row_idx]
+                        adv = advantages_tensor[row_idx]
+                        step_adv = float((adv * mask).sum().item())
+
+                    step_data = {
+                        "step": step_j,
+                        "observation": obs_text,
+                        "action": action_text,
+                        "s_theta": round(float(s_theta[row_idx]), 6),
+                        "consecutive_s": round(float(consecutive_s[row_idx]), 6),
+                        "entropy_mean": round(float(ent_mean[row_idx]), 6),
+                        "entropy_std": round(float(ent_std[row_idx]), 6),
+                        "entropy_min": round(float(ent_min[row_idx]), 6),
+                        "entropy_max": round(float(ent_max[row_idx]), 6),
+                        "advantage": round(step_adv, 6),
+                        "step_reward": round(float(step_rewards[row_idx]), 4) if step_rewards[row_idx] is not None else 0.0,
+                    }
+                    if s_ref is not None:
+                        step_data["s_ref"] = round(float(s_ref[row_idx]), 6)
+                    if delta_s is not None:
+                        step_data["delta_s"] = round(float(delta_s[row_idx]), 6)
+                    if wm_s is not None:
+                        step_data["wm_s"] = round(float(wm_s[row_idx]), 6)
+
+                    steps.append(step_data)
 
                 cases.append({
                     "traj_id": str(traj_id),
@@ -1045,25 +1250,26 @@ class RayPPOTrainer:
                     "steps": steps,
                 })
 
-            # Sort: failures first (more interesting for debugging), then by n_steps desc
             cases.sort(key=lambda c: (c["success"], -c["n_steps"]))
 
-            # Save (limit to 20 trajectories to keep file size reasonable)
             output = {
                 "global_step": self.global_steps,
                 "n_trajectories": len(cases),
                 "n_success": sum(1 for c in cases if c["success"]),
                 "n_failure": sum(1 for c in cases if not c["success"]),
-                "trajectories": cases[:20],
+                "trajectories": cases,
             }
 
             os.makedirs(local_global_step_folder, exist_ok=True)
-            with open(ocar_log_path, "w") as f:
+            with open(log_path, "w") as f:
                 _json.dump(output, f, indent=2, ensure_ascii=False)
-            print(f"OCAR trajectory cases saved to {ocar_log_path} ({len(cases[:20])} trajs)")
+            print(f"Observe trajectories saved: {log_path} "
+                  f"({len(cases)} trajs, {output['n_success']} success, {output['n_failure']} failure)")
 
         except Exception as e:
-            print(f"Warning: failed to dump OCAR trajectories: {e}")
+            import traceback
+            print(f"Warning: failed to dump observe trajectories: {e}")
+            traceback.print_exc()
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -1272,6 +1478,9 @@ class RayPPOTrainer:
                         entropy_loss = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
                         old_log_prob_metrics = {"actor/entropy_loss": entropy_loss.detach().item()}
                         metrics.update(old_log_prob_metrics)
+                        # Keep entropy for observe_surprise logging before discarding
+                        if self.config.algorithm.get("observe_surprise", False):
+                            batch.batch["step_entropys"] = entropys.clone()
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
 
@@ -1360,7 +1569,15 @@ class RayPPOTrainer:
                             gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
                             ocar_tau=self.config.algorithm.ocar.tau if hasattr(self.config.algorithm, 'ocar') else 1.0,
                             ocar_use_delta_s=self.config.algorithm.ocar.use_delta_s if hasattr(self.config.algorithm, 'ocar') else True,
+                            observe_surprise=self.config.algorithm.get("observe_surprise", False),
                         )
+
+                    # Optional: world-model surprise (extra forward pass)
+                    if self.config.algorithm.get("observe_surprise_wm", False):
+                        with _timer("wm_surprise", timing_raw):
+                            from ocar.surprise_observer import compute_wm_surprise
+                            wm_s = compute_wm_surprise(batch, self.actor_rollout_wg, self.tokenizer)
+                            batch.non_tensor_batch["obs_wm_s"] = wm_s
 
                     # update critic
                     if self.use_critic:
@@ -1406,8 +1623,11 @@ class RayPPOTrainer:
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
                             # ── OCAR: dump trajectory cases alongside checkpoint ──
-                            if self.config.algorithm.adv_estimator == AdvantageEstimator.OCAR and hasattr(batch, '_ocar_traj_summaries'):
+                            if self.config.algorithm.adv_estimator == AdvantageEstimator.OCAR:
                                 self._dump_ocar_trajectories(batch, timing_raw)
+                            # ── Observe mode: dump trajectory cases with surprise variants ──
+                            if self.config.algorithm.get("observe_surprise", False):
+                                self._dump_observe_trajectories(batch)
 
                 # training metrics
                 metrics.update(
@@ -1417,8 +1637,147 @@ class RayPPOTrainer:
                     }
                 )
                 # ── OCAR: add surprise metrics to wandb ──
-                if self.config.algorithm.adv_estimator == AdvantageEstimator.OCAR and hasattr(batch, '_ocar_metrics'):
-                    metrics.update(batch._ocar_metrics)
+                if self.config.algorithm.adv_estimator == AdvantageEstimator.OCAR:
+                    from ocar.core_ocar import compute_ocar_outcome_advantage as _ocar_fn
+                    if hasattr(_ocar_fn, '_last_metrics') and _ocar_fn._last_metrics:
+                        metrics.update(_ocar_fn._last_metrics)
+
+                    # Per-task-type surprise analysis (diagnose clean/heat/etc. imbalance)
+                    try:
+                        traj_uids = batch.non_tensor_batch.get("traj_uid", np.array([]))
+                        anchor_obs = batch.non_tensor_batch.get("anchor_obs", np.array([]))
+                        s_theta = batch.non_tensor_batch.get("obs_surprise_theta", np.array([]))
+                        s_ref = batch.non_tensor_batch.get("obs_surprise_ref", np.zeros_like(s_theta))
+                        ep_rewards = batch.non_tensor_batch.get("episode_rewards", np.array([]))
+
+                        if len(anchor_obs) > 0 and len(s_theta) > 0:
+                            # Group by trajectory, detect task type from anchor_obs keywords
+                            task_types = {
+                                "clean": ["clean", "sinkbasin"],
+                                "heat": ["heat", "microwave", "stoveburner"],
+                                "cool": ["cool", "fridge"],
+                                "pick_place": ["pick", "put", "place"],
+                                "examine": ["examine", "lamp", "desklamp"],
+                            }
+                            task_surprise = defaultdict(lambda: {"s_theta": [], "delta_s": [], "rewards": []})
+
+                            traj2rows = defaultdict(list)
+                            for i in range(len(traj_uids)):
+                                traj2rows[traj_uids[i]].append(i)
+
+                            for traj_id, rows in traj2rows.items():
+                                # Detect task type from first step's observation
+                                first_obs = str(anchor_obs[rows[0]]).lower() if anchor_obs[rows[0]] is not None else ""
+                                detected_task = "other"
+                                for task_name, keywords in task_types.items():
+                                    if any(kw in first_obs for kw in keywords):
+                                        detected_task = task_name
+                                        break
+
+                                traj_s_theta = [float(s_theta[r]) for r in rows]
+                                traj_delta_s = [float(s_theta[r] - s_ref[r]) for r in rows]
+                                traj_reward = float(ep_rewards[rows[0]]) if len(ep_rewards) > rows[0] else 0.0
+
+                                task_surprise[detected_task]["s_theta"].extend(traj_s_theta)
+                                task_surprise[detected_task]["delta_s"].extend(traj_delta_s)
+                                task_surprise[detected_task]["rewards"].append(traj_reward)
+
+                            for task_name, data_dict in task_surprise.items():
+                                if data_dict["s_theta"]:
+                                    metrics[f"ocar_task/{task_name}_s_theta_mean"] = float(np.mean(data_dict["s_theta"]))
+                                    metrics[f"ocar_task/{task_name}_delta_s_mean"] = float(np.mean(data_dict["delta_s"]))
+                                if data_dict["rewards"]:
+                                    metrics[f"ocar_task/{task_name}_success_rate"] = float(np.mean([r > 0 for r in data_dict["rewards"]]))
+                                    metrics[f"ocar_task/{task_name}_reward_mean"] = float(np.mean(data_dict["rewards"]))
+                    except Exception as e:
+                        print(f"Warning: per-task OCAR analysis failed: {e}")
+
+                # ── Observe mode: add surprise variant metrics to wandb ──
+                if self.config.algorithm.get("observe_surprise", False):
+                    try:
+                        observe_keys = [
+                            "obs_s_theta", "obs_s_ref", "obs_delta_s", "obs_consecutive_s",
+                            "obs_wm_s", "obs_step_entropy_mean", "obs_step_entropy_std",
+                            "obs_step_entropy_min", "obs_step_entropy_max",
+                        ]
+                        for key in observe_keys:
+                            arr = batch.non_tensor_batch.get(key)
+                            if arr is not None and len(arr) > 0:
+                                metrics[f"observe/{key}_mean"] = float(np.mean(arr))
+                                metrics[f"observe/{key}_std"] = float(np.std(arr))
+
+                        # Success vs failure breakdown
+                        traj_uids = batch.non_tensor_batch.get("traj_uid", np.array([]))
+                        ep_rewards = batch.non_tensor_batch.get("episode_rewards", np.array([]))
+                        s_theta = batch.non_tensor_batch.get("obs_s_theta", np.array([]))
+
+                        if len(traj_uids) > 0 and len(s_theta) > 0 and len(ep_rewards) > 0:
+                            traj2rows = defaultdict(list)
+                            for i in range(len(traj_uids)):
+                                traj2rows[traj_uids[i]].append(i)
+
+                            success_s, failure_s = [], []
+                            success_ent, failure_ent = [], []
+                            ent_mean = batch.non_tensor_batch.get("obs_step_entropy_mean", np.array([]))
+
+                            for traj_id, rows in traj2rows.items():
+                                traj_reward = float(ep_rewards[rows[0]]) if len(ep_rewards) > rows[0] else 0.0
+                                traj_s = [float(s_theta[r]) for r in rows]
+                                if traj_reward > 0:
+                                    success_s.extend(traj_s)
+                                    if len(ent_mean) > 0:
+                                        success_ent.extend([float(ent_mean[r]) for r in rows])
+                                else:
+                                    failure_s.extend(traj_s)
+                                    if len(ent_mean) > 0:
+                                        failure_ent.extend([float(ent_mean[r]) for r in rows])
+
+                            if success_s:
+                                metrics["observe/success_s_theta_mean"] = float(np.mean(success_s))
+                                metrics["observe/success_s_theta_std"] = float(np.std(success_s))
+                            if failure_s:
+                                metrics["observe/failure_s_theta_mean"] = float(np.mean(failure_s))
+                                metrics["observe/failure_s_theta_std"] = float(np.std(failure_s))
+                            if success_ent:
+                                metrics["observe/success_entropy_mean"] = float(np.mean(success_ent))
+                            if failure_ent:
+                                metrics["observe/failure_entropy_mean"] = float(np.mean(failure_ent))
+
+                        # Per-task-type breakdown
+                        anchor_obs = batch.non_tensor_batch.get("anchor_obs", np.array([]))
+                        if len(anchor_obs) > 0 and len(s_theta) > 0 and len(traj_uids) > 0:
+                            task_types = {
+                                "clean": ["clean", "sinkbasin"],
+                                "heat": ["heat", "microwave", "stoveburner"],
+                                "cool": ["cool", "fridge"],
+                                "pick_place": ["pick", "put", "place"],
+                                "examine": ["examine", "lamp", "desklamp"],
+                            }
+                            task_data = defaultdict(lambda: {"s_theta": [], "entropy": [], "rewards": []})
+
+                            for traj_id, rows in traj2rows.items():
+                                first_obs = str(anchor_obs[rows[0]]).lower() if anchor_obs[rows[0]] is not None else ""
+                                detected = "other"
+                                for tname, kws in task_types.items():
+                                    if any(kw in first_obs for kw in kws):
+                                        detected = tname
+                                        break
+                                task_data[detected]["s_theta"].extend([float(s_theta[r]) for r in rows])
+                                if len(ent_mean) > 0:
+                                    task_data[detected]["entropy"].extend([float(ent_mean[r]) for r in rows])
+                                traj_reward = float(ep_rewards[rows[0]]) if len(ep_rewards) > rows[0] else 0.0
+                                task_data[detected]["rewards"].append(traj_reward)
+
+                            for tname, d in task_data.items():
+                                if d["s_theta"]:
+                                    metrics[f"observe_task/{tname}_s_theta_mean"] = float(np.mean(d["s_theta"]))
+                                if d["entropy"]:
+                                    metrics[f"observe_task/{tname}_entropy_mean"] = float(np.mean(d["entropy"]))
+                                if d["rewards"]:
+                                    metrics[f"observe_task/{tname}_success_rate"] = float(np.mean([r > 0 for r in d["rewards"]]))
+                    except Exception as e:
+                        print(f"Warning: observe_surprise metrics failed: {e}")
+
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))

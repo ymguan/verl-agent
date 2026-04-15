@@ -1,18 +1,19 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────────
-# OCAR RL Training on ALFWorld — Direct verl-agent Integration
+# Pure GRPO Training on ALFWorld — with Observational Surprise Logging
 #
-# Uses OCAR (Observation-grounded Credit Advantage Redistribution)
-# as the advantage estimator, replacing GRPO's uniform credit
-# with surprise-weighted per-step redistribution.
+# Uses standard GRPO advantage (no OCAR reweighting).
+# Computes and logs surprise variants + entropy for analysis only.
 #
-# Changes vs standard GRPO:
-#   algorithm.adv_estimator=ocar  (instead of grpo)
-#   algorithm.ocar.tau=1.0        (softmax temperature)
-#   algorithm.ocar.use_delta_s=true (ΔS = S_θ - S_ref denoising)
+# Surprise signals logged (observe-only, do NOT influence training):
+#   - obs_s_theta: raw NLL from actor
+#   - obs_s_ref: raw NLL from reference model
+#   - obs_delta_s: S_theta - S_ref
+#   - obs_consecutive_s: step-to-step surprise delta
+#   - obs_step_entropy_{mean,std,min,max}: action token entropy
 #
-# ΔS automatically uses ref model log probs (already computed for KL)
-# so this adds ZERO extra forward passes to the training loop.
+# Optional: +algorithm.observe_surprise_wm=true for world-model
+# style surprise (extra forward pass cost).
 # ──────────────────────────────────────────────────────────────
 set -x
 ENGINE=${1:-vllm}
@@ -23,11 +24,7 @@ export VLLM_USE_V1=1
 PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 export ALFWORLD_DATA=${ALFWORLD_DATA:-$PROJECT_DIR/alfworld_data}
 
-# ── OCAR-specific config ──
-OCAR_TAU=${OCAR_TAU:-1.0}              # softmax temperature (higher = more uniform)
-OCAR_USE_DELTA_S=${OCAR_USE_DELTA_S:-true}  # use ΔS = S_θ - S_ref
-
-# ── Standard config ──
+# ── Standard config (same as OCAR baseline for fair comparison) ──
 num_cpus_per_env_worker=0.1
 train_data_size=16
 val_data_size=128
@@ -39,16 +36,15 @@ SEED=${SEED:-0}
 
 DATA_DIR=${DATA_DIR:-$HOME/data/verl-agent/text}
 
-# Ensure parquet data matches batch sizes (same as GRPO baseline)
+# Ensure parquet data matches batch sizes
 python3 -m examples.data_preprocess.prepare \
     --mode 'text' \
     --train_data_size $train_data_size \
     --val_data_size $val_data_size
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=ocar \
-    +algorithm.ocar.tau=$OCAR_TAU \
-    +algorithm.ocar.use_delta_s=$OCAR_USE_DELTA_S \
+    algorithm.adv_estimator=grpo \
+    +algorithm.observe_surprise=true \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
     data.train_batch_size=$train_data_size \
@@ -90,8 +86,8 @@ python3 -m verl.trainer.main_ppo \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
-    trainer.project_name="ocar_alfworld_$(date +%Y%m%d_%H%M%S)" \
-    trainer.experiment_name="ocar_tau${OCAR_TAU}_ds${OCAR_USE_DELTA_S}" \
+    trainer.project_name="grpo_observe_alfworld_$(date +%Y%m%d_%H%M%S)" \
+    trainer.experiment_name="grpo_observe_seed${SEED}" \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
     trainer.save_freq=20 \

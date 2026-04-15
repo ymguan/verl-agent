@@ -130,6 +130,7 @@ def compute_ocar_outcome_advantage(
     tau: float = 1.0,
     use_delta_s: bool = True,
     epsilon: float = 1e-6,
+    znorm_epsilon: float = 0.1,
     norm_adv_by_std_in_grpo: bool = True,
     compute_mean_std_cross_steps: bool = True,
     weight_clip_min: float = 0.1,
@@ -183,6 +184,12 @@ def compute_ocar_outcome_advantage(
     if use_delta_s and obs_surprise_ref is not None:
         surprise = obs_surprise_theta.astype(np.float64) - obs_surprise_ref.astype(np.float64)
     else:
+        if use_delta_s and obs_surprise_ref is None:
+            logger.warning(
+                "OCAR: use_delta_s=True but ref_log_prob not available. "
+                "Falling back to raw S_theta. Check that use_kl_loss=True or "
+                "use_reference_policy is enabled."
+            )
         surprise = obs_surprise_theta.astype(np.float64)
 
     # ── Step 3: OCAR per-trajectory softmax weights ──
@@ -204,10 +211,15 @@ def compute_ocar_outcome_advantage(
         if np.std(traj_s) < 1e-10:
             continue  # all same → uniform
 
+        # Z-score normalization: stabilize signal across training stages
+        # When std < epsilon, z-scores compress → weights ≈ uniform → degrades to GRPO
+        s_std = max(np.std(traj_s), znorm_epsilon)
+        traj_z = (traj_s - np.mean(traj_s)) / s_std
+
         if traj_adv > 0:
-            w = T * _softmax(-traj_s, temperature=tau)
+            w = T * _softmax(-traj_z, temperature=tau)
         elif traj_adv < 0:
-            w = T * _softmax(traj_s, temperature=tau)
+            w = T * _softmax(traj_z, temperature=tau)
         else:
             continue
 
@@ -215,8 +227,15 @@ def compute_ocar_outcome_advantage(
             ocar_weights[idx] = w[j]
 
     # ── Clamp weights to prevent extreme values ──
+    # Scale clip_max with trajectory length: for T-step trajectory,
+    # weights = T * softmax(...) so max possible weight = T.
+    # Use min(T, clip_max) to avoid always clamping long trajectories.
     ocar_weights_raw = ocar_weights.copy()
-    ocar_weights = np.clip(ocar_weights, weight_clip_min, weight_clip_max)
+    for traj_id, indices in traj2indices.items():
+        T = len(indices)
+        effective_max = min(T, weight_clip_max)
+        for idx in indices:
+            ocar_weights[idx] = np.clip(ocar_weights[idx], weight_clip_min, effective_max)
     n_clipped = int(np.sum(ocar_weights_raw != ocar_weights))
 
     # ── Step 4: Apply weights to episode advantage ──
@@ -248,7 +267,7 @@ def compute_ocar_outcome_advantage(
     traj_summaries = []
     for traj_id, indices in traj2indices.items():
         indices = sorted(indices)
-        traj_reward = float(scores[indices[0]].item())
+        traj_reward = float(sum(scores[i].item() for i in indices))
         traj_success = traj_reward > 0
         traj_summaries.append({
             "traj_id": str(traj_id),
