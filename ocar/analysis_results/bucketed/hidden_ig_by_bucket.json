@@ -1,0 +1,122 @@
+[
+  {
+    "env": "alfworld",
+    "hidden_path": "ocar/analysis_results/hidden_state/alfworld_step150.json",
+    "n_traj": 31,
+    "overall_r_ig": 0.11287033964675725,
+    "overall_p_ig": 0.5454798031106651,
+    "overall_n": 31,
+    "buckets": {
+      "nothing_happens": {
+        "n": 11,
+        "r": null,
+        "p": null,
+        "succ_mean": null,
+        "fail_mean": 272.9669190228775,
+        "n_succ": 0,
+        "n_fail": 11
+      },
+      "new_location": {
+        "n": 31,
+        "r": -0.03741657010946228,
+        "p": 0.8416093475269034,
+        "succ_mean": 278.1900203950064,
+        "fail_mean": 280.30628792238434,
+        "n_succ": 20,
+        "n_fail": 11
+      },
+      "revisit": {
+        "n": 17,
+        "r": -0.11210311031930054,
+        "p": 0.6683883244661152,
+        "succ_mean": 278.982792082287,
+        "fail_mean": 285.4088710239955,
+        "n_succ": 7,
+        "n_fail": 10
+      },
+      "state_change": {
+        "n": 24,
+        "r": 0.1392117178900921,
+        "p": 0.5164943258373227,
+        "succ_mean": 275.2678385316936,
+        "fail_mean": 259.3482149396624,
+        "n_succ": 17,
+        "n_fail": 7
+      }
+    }
+  },
+  {
+    "env": "webshop",
+    "hidden_path": "ocar/analysis_results/hidden_state/webshop_step240.json",
+    "n_traj": 32,
+    "overall_r_ig": 0.1861696260314052,
+    "overall_p_ig": 0.30763911712120423,
+    "overall_n": 32,
+    "buckets": {
+      "product_detail": {
+        "n": 32,
+        "r": 0.18746164882194205,
+        "p": 0.3042337474863198,
+        "succ_mean": 253.81262741088867,
+        "fail_mean": 247.09676850476518,
+        "n_succ": 15,
+        "n_fail": 17
+      },
+      "search_page": {
+        "n": 16,
+        "r": -0.1320629940864958,
+        "p": 0.6258713655126003,
+        "succ_mean": 294.3133964538574,
+        "fail_mean": 299.66062355041504,
+        "n_succ": 8,
+        "n_fail": 8
+      },
+      "search_results": {
+        "n": 25,
+        "r": -0.05446660799699883,
+        "p": 0.7959575261089314,
+        "succ_mean": 278.97034246271306,
+        "fail_mean": 282.06018774850025,
+        "n_succ": 11,
+        "n_fail": 14
+      }
+    }
+  },
+  {
+    "env": "webshop",
+    "hidden_path": "ocar/analysis_results/hidden_state/webshop_step640.json",
+    "n_traj": 32,
+    "overall_r_ig": -0.14367465588744754,
+    "overall_p_ig": 0.4327504622446096,
+    "overall_n": 32,
+    "buckets": {
+      "product_detail": {
+        "n": 32,
+        "r": -0.3911128581326494,
+        "p": 0.02686618234361158,
+        "succ_mean": 244.78620146599374,
+        "fail_mean": 257.80237381546584,
+        "n_succ": 23,
+        "n_fail": 9
+      },
+      "search_page": {
+        "n": 17,
+        "r": -0.039422283727789,
+        "p": 0.8805919868771892,
+        "succ_mean": 280.0669595400492,
+        "fail_mean": 284.54847717285156,
+        "n_succ": 16,
+        "n_fail": 1
+      },
+      "search_results": {
+        "n": 27,
+        "r": 0.10751804912576954,
+        "p": 0.5934828695005837,
+        "succ_mean": 263.27067678946037,
+        "fail_mean": 256.95374382866754,
+        "n_succ": 18,
+        "n_fail": 9
+      }
+    }
+  }
+]

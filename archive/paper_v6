@@ -1,0 +1,647 @@
+# Paper v6: Dual-Token Training for Agent RL
+
+> **核心命题：** Agent RL 的轨迹由两种 token 交替构成——模型生成的 action tokens 和环境产生的 observation tokens。当前所有方法只训练 action tokens 而丢弃 observation tokens 的梯度。我们证明这不仅浪费了免费信号，还导致模型的 world model 在 RL 训练中逐渐退化。只需在 observation tokens 上加一个标准 NLL loss，就能同时学习"做什么"和"世界如何运作"——零额外推理成本。
+>
+> **Status:** Implementation Ready (2026-04-15)
+> **Target:** NeurIPS / ICLR 2026
+
+---
+
+## 0. 为什么这个 idea 是 Agent-Specific 的
+
+| 任务类型 | 轨迹 tokens 构成 | 有 observation tokens? |
+|---------|----------------|:---:|
+| 数学推理 | 模型一次性生成整个 CoT + 答案 | ❌ |
+| 代码竞赛 | 模型生成代码 → 环境返回标量 pass/fail（不参与序列） | ❌ |
+| Agent (ALFWorld) | $[o_0, a_1, o_1, a_2, o_2, \ldots]$ 交替 | ✅ |
+| Agent (WebShop) | $[\text{page}_0, a_1, \text{page}_1, \ldots]$ 交替 | ✅ |
+| Agent (SWE-bench) | $[\text{output}_0, \text{cmd}_1, \text{output}_1, \ldots]$ 交替 | ✅ |
+
+**Dual-Token Training 在数学/代码推理中字面上无法实施——因为不存在 observation tokens。** 这是 agent RL 独有的范式优势。
+
+---
+
+## 1. 问题：被丢弃的免费信号
+
+### 1.1 当前 Agent RL 的训练流程
+
+以 verl-agent 框架为例（实际代码已验证）：
+
+```
+轨迹序列:  [sys, o₀, a₁, o₁, a₂, o₂, ..., aT, oT]
+loss_mask:  [0,   0,  1,  0,  1,  0,      1,  0 ]
+                      ↑       ↑           ↑
+                   RL loss  RL loss    RL loss
+```
+
+- `loss_mask = 1`：action tokens → 计算 PPO/GRPO loss，梯度反传
+- `loss_mask = 0`：observation tokens → **logits 已计算但梯度清零**
+
+**浪费**：forward pass 在处理 observation token $w_j$ 时已经计算了 $P_\theta(w_j | w_{<j})$，但这个标量被丢弃了。
+
+> **技术细节：** 在 verl-agent 中，`logprobs_from_logits(logits, labels_rolled)` 对整个 response 序列（action + observation tokens）计算 per-token log probability。当前代码通过 `response_mask = data["loss_mask"]` 将 observation 位置的梯度清零。但 obs 位置的 log_prob 数值已存在于内存中，可直接复用。
+
+### 1.2 这个信号意味着什么？
+
+$-\log P_\theta(w_j | w_{<j})$ 对 observation tokens 的含义是：**模型对环境响应的预测误差——即隐式 world model 的质量度量。**
+
+- 低 NLL → 模型预料到了这个环境反馈 → world model 准确 → agent 行为 grounded
+- 高 NLL → 模型没预料到 → world model 失准 → agent 行为可能 ungrounded
+
+这正是我们之前发现的 observation surprise $S(o_t)$。但之前我们只把它当 **monitoring signal**，从未在训练时利用。
+
+---
+
+## 2. 方法：Dual-Token Training
+
+### 2.1 核心公式
+
+$$\boxed{\mathcal{L}_{\text{total}} = \underbrace{\mathcal{L}_{\text{RL}}(\theta; \mathcal{A})}_{\text{在 action tokens 上做 RL}} + \lambda \cdot \underbrace{\mathcal{L}_{\text{WM}}(\theta; \mathcal{O})}_{\text{在 observation tokens 上做 NLL}}}$$
+
+其中：
+
+$$\mathcal{L}_{\text{RL}} = \text{agg}\bigg(\max\big(-\rho_t A_t,\, -\text{clip}(\rho_t) A_t\big) \cdot \mathbb{1}[t \in \mathcal{A}]\bigg) \quad \text{（标准 PPO-Clip / GRPO）}$$
+
+$$\mathcal{L}_{\text{WM}} = -\frac{1}{|\mathcal{O}|}\sum_{j \in \mathcal{O}} \log P_\theta(w_j | w_{<j}) \quad \text{（标准 auto-regressive NLL）}$$
+
+- $\mathcal{A}$ = action token 位置集合（原 `loss_mask=1`）
+- $\mathcal{O}$ = observation token 位置集合（原 `loss_mask=0`，除去 system/prompt tokens）
+- $\lambda$ = 平衡超参数
+
+### 2.2 obs_mask：已有基础设施，无需新增
+
+**关键简化**：在 verl-agent 的 multi-turn rollout 中，`loss_mask` 和 `attention_mask` 已经提供了区分 obs/action tokens 所需的全部信息：
+
+```python
+# response 部分的 obs mask（在 dp_actor.py update_policy 中）
+response_mask = data["loss_mask"][:, -response_length:]  # 1=action, 0=obs
+attention_mask_resp = data["attention_mask"][:, -response_length:]  # 1=valid, 0=pad
+obs_mask = (attention_mask_resp == 1) & (response_mask == 0)  # obs tokens in response
+```
+
+**注意事项**：
+- `obs_mask` 包含 response 部分中所有 `loss_mask=0` 的 valid tokens
+- 这包括环境返回的 observation 内容 + chat template 标记（如 `<|im_start|>tool`）
+- System prompt 和初始 observation $o_0$ 在 prompt 部分（不在 response 部分），**自动排除**
+- Chat template tokens 的 NLL 极低（模型已完美预测），对梯度贡献可忽略，无需特别处理
+
+### 2.3 代码实现（精确到行）
+
+**唯一需要修改的文件：`verl/workers/actor/dp_actor.py`**
+
+在 `update_policy` 方法中（约 line 445 后），现有代码：
+
+```python
+if self.config.use_kl_loss:
+    ...
+    policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
+```
+
+在这之后，加入 Dual-Token loss：
+
+```python
+# ===== Dual-Token: World Model Loss on Observation Tokens =====
+wm_loss_coef = self.config.get("wm_loss_coef", 0.0)
+if wm_loss_coef > 0 and multi_turn:
+    attention_mask_resp = attention_mask[:, -response_length:]
+    obs_mask = (attention_mask_resp == 1) & (response_mask == 0)
+    obs_nll = -log_prob * obs_mask  # log_prob is (bsz, response_length)
+    n_obs_tokens = obs_mask.sum().clamp(min=1)
+    wm_loss = obs_nll.sum() / n_obs_tokens
+    policy_loss = policy_loss + wm_loss * wm_loss_coef
+    metrics["actor/wm_loss"] = wm_loss.detach().item()
+    metrics["actor/wm_n_tokens"] = n_obs_tokens.detach().item()
+```
+
+**改动量：8 行代码。** 无需新文件、新 mask、新 forward pass。
+
+**Config 传递**（`run_alfworld_dual_token.sh`）：
+
+```bash
+actor_rollout_ref.actor.wm_loss_coef=0.1
+```
+
+### 2.4 为什么 log_prob 已经包含 obs tokens 的信息？
+
+在 `dp_actor.py:_forward_micro_batch`（line 155-206）中：
+
+1. `logprobs_from_logits(logits_rmpad, input_ids_rmpad_rolled)` 对 **整个序列** 计算 per-token log prob
+2. `full_log_probs = pad_input(...)` 得到 `(bsz, seqlen)` 的完整 log probs
+3. `log_probs = full_log_probs[:, -response_length-1:-1]` 切片到 response 部分
+
+关键：step 3 的 `log_probs` **已经包含 response 部分中所有 token（action + obs）的 log prob**。当前代码通过 `response_mask` 只对 action tokens 计算 loss。我们只需在 obs tokens 上加一个额外的 NLL loss —— 不需要任何额外的 forward pass。
+
+---
+
+## 3. 关键问题：两个 Loss 是否会冲突？
+
+### 3.1 表面答案：不冲突
+
+两个 loss 作用在**不重叠的 token 集合**上：
+- $\mathcal{L}_{\text{RL}}$ 只对 $t \in \mathcal{A}$（action tokens）计算梯度
+- $\mathcal{L}_{\text{WM}}$ 只对 $j \in \mathcal{O}$（observation tokens）计算梯度
+
+看起来互不干涉。但这是**错误的**——因为共享参数 $\theta$。两个 loss 通过共享的 transformer 参数传递不同的梯度信号。
+
+### 3.2 深入分析：梯度在做什么？
+
+考虑一条具体轨迹：
+
+```
+a₁ = "go to kitchen"    →  o₁ = "You are in the kitchen. You see a tomato."
+a₂ = "take tomato"       →  o₂ = "You pick up the tomato."
+```
+
+**RL 梯度（假设 reward=1）：**
+- ∂L_RL/∂θ 推动 $\theta$ 让 "go to kitchen" 和 "take tomato" 在这个 context 下更 likely
+
+**Obs NLL 梯度：**
+- ∂L_WM/∂θ 推动 $\theta$ 让 "You are in the kitchen..." 在 "go to kitchen" 之后更 predictable
+
+**这两个方向是 aligned 的：** 如果模型更好地理解 "go to kitchen → 厨房里有东西"，它也会更倾向于在需要找东西时选择 go to kitchen。**World model 知识帮助 policy。**
+
+### 3.3 可能冲突的场景分析
+
+#### 场景 1：探索性动作
+
+- $a_t$ = "examine mirror"（环境返回新信息但对任务无帮助）
+- $o_t$ = "You see your reflection in the mirror."（高 surprise）
+
+RL 梯度：如果后来失败，push $\theta$ 让 "examine mirror" 变少 likely
+Obs NLL 梯度：push $\theta$ 更好预测 "You see your reflection..."
+
+**是否冲突？** 不冲突。RL 说 "别做这件事"，NLL 说 "但如果做了，理解后果"。前者影响 action generation 的条件概率 $P(a|h)$，后者影响 observation prediction 的条件概率 $P(o|h,a)$。在 transformer 中，这两个条件概率虽共享参数，但学习的是不同的输入-输出映射。
+
+#### 场景 2：模型容量竞争
+
+这是唯一真正的风险——经典 multi-task learning tension：
+
+- 如果模型容量 finite，训练 world model 可能 "占用" policy 需要的表征空间
+- 在 7B+ 模型上，这个风险很低（容量充裕）
+- 在小模型（1.5B-）上可能需要降低 $\lambda$
+
+#### 场景 3：梯度方向量化分析
+
+更精确地，在位置 $j \in \mathcal{O}$（observation token），NLL 梯度为：
+
+$$\nabla_\theta \mathcal{L}_{\text{WM}} = -\nabla_\theta \log P_\theta(w_j | w_{<j})$$
+
+这个梯度通过 transformer 参数 $\theta$ 反传时，会经过 attention 层。关键是：observation token $w_j$ attend to 的 context $w_{<j}$ 包含了之前的 action tokens。因此 NLL 梯度实际上是在告诉模型："学会从 action+history 预测环境反馈"。
+
+这与 RL 梯度 $\nabla_\theta \mathcal{L}_{\text{RL}}$ 的方向关系取决于：
+- 如果正确的 action 倾向于产生 predictable observations → **正相关**
+- 如果正确的 action 倾向于产生 surprising observations → **负相关**
+
+**经验事实（我们已有数据）：** 成功轨迹中 observation surprise 显著低于失败轨迹（Spearman ρ=0.53），说明**好的 action 确实产生更 predictable 的 observations**。因此两个梯度方向主要是正相关的。
+
+### 3.4 结论：补充 vs 竞争
+
+| 类比 | 旧方法 | 我们 |
+|------|--------|------|
+| KL penalty in RLHF | RL loss + $\lambda_{\text{KL}} D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})$ | RL loss + $\lambda \mathcal{L}_{\text{WM}}$ |
+| 功能 | 防止 policy 偏离预训练分布 | 显式优化 world model + 稳定 RL 训练 |
+| 信号来源 | 静态 ref model | 动态环境反馈（on-policy, ground truth） |
+
+**$\mathcal{L}_{\text{WM}}$ 可以被理解为一种更好的正则化：**
+- KL penalty 要求 "不要忘记预训练知识"（static，off-policy）
+- Obs NLL 要求 "持续理解你当前遇到的环境"（dynamic，on-policy，ground truth）
+- 初步实验表明：RL 训练会隐式改善 world model（obs NLL↓24.8%），但这个改善是不受控的副产品。崩溃阶段 world model 跟着退化（obs NLL↑3.3%），且 success/failure 区分度消失。$\mathcal{L}_{\text{WM}}$ 将隐式过程显式化，并在 RL 不稳定时提供 gradient anchor。
+
+---
+
+## 4. 理论支撑
+
+### 4.1 信息论联系：Obs NLL 隐式优化 PMI
+
+$$\mathcal{L}_{\text{WM}} = -\frac{1}{|\mathcal{O}|}\sum_{j \in \mathcal{O}} \log P_\theta(w_j | w_{<j})$$
+
+对于 observation $o_t$ 中的 tokens，$w_{<j}$ 包含 $h_t$ 和 $a_t$。因此：
+
+$$-\log P_\theta(o_t | h_t, a_t) = -\log P_\theta(o_t | h_t) - \text{PMI}_\theta(a_t; o_t | h_t)$$
+
+最小化 $\mathcal{L}_{\text{WM}}$ 等价于最大化：
+
+$$\underbrace{\log P_\theta(o_t | h_t)}_{\text{环境动力学的边际预测}} + \underbrace{\text{PMI}_\theta(a_t; o_t | h_t)}_{\text{action-observation 因果关联}}$$
+
+通过 PMI 对称性，第二项可改写为 $\log P_\theta(a_t|h_t,o_t) - \log P_\theta(a_t|h_t)$，这正是 EPSD/SDPO 的 advantage。但注意：$\mathcal{L}_{\text{WM}}$ 同时优化**两项**——边际预测（更好的环境建模）和 PMI（action-observation 因果关联）。因此 obs NLL 不等价于 SDPO advantage，而是其**超集**：SDPO 只优化 PMI 项，我们同时优化 PMI + 边际预测。
+
+**这意味着 $\mathcal{L}_{\text{WM}}$ 隐式地同时做两件事：**(1) 让模型更好地理解环境的一般动力学，(2) 让模型学习 action 到 observation 的因果映射。
+
+### 4.2 与 Model-Based RL 的联系
+
+| 方法 | World Model | Policy | 空间 | 额外成本 |
+|------|------------|--------|------|:---:|
+| Dreamer | 独立网络在 latent space | 在 dreamed states 上训 | latent | +1 model |
+| MuZero | 动力学 + 预测头 | MCTS | latent | +1 model |
+| **Ours** | 同一 transformer 在 token space | 同一 transformer 在 action tokens | token | **零** |
+
+核心差异：
+1. 不需要独立的 world model 网络——autoregressive LLM 天然是 world model
+2. World model 在 **token space**（不是 latent space），直接使用环境的 ground truth 文本
+3. 零额外推理成本——推理时不需要 world model，只生成 action
+
+### 4.3 Obs NLL 的收益机制：间接而非直接
+
+**关键澄清：** 推理时模型不会生成 observation tokens（obs 由环境提供），因此 obs NLL 不直接帮助推理阶段的任何计算。它的收益是**间接的**：
+
+1. **表征质量**：obs NLL 训练让 transformer 内部的隐状态更好地编码环境动力学，这些隐状态在生成 action 时也被使用（通过 attention 和残差连接）。更好的环境理解 → 更好的 action 选择。
+2. **正则化效果**：obs NLL 阻止 RL 训练破坏模型的环境理解能力（见下节 degradation 假说），间接保护 action 质量。
+3. **不是让模型学会"输出 observation"**：模型学到的是"理解在这个状态下做这个动作后世界会怎样变化"，这个知识通过共享参数改善 action generation。
+
+**这意味着：如果 transformer 的 action-generation 和 obs-prediction 使用的是高度独立的参数子集（低共享性），那么 obs NLL 的收益将很小。** 但经验上 LLM 的参数高度共享（同一个 attention layer 处理所有 token），所以我们预期收益显著。这是需要实验验证的核心假设。
+
+### 4.4 World Model Dynamics 假说（已有初步实验证据）
+
+**原假说：** 纯 RL 训练（仅在 action tokens 上更新 $\theta$）会导致模型的 observation prediction 能力单调退化。
+
+**初步实验结果（OCAR/ALFWorld, Qwen2.5-7B-Instruct, 20 条固定轨迹）：**
+
+| Checkpoint | Obs NLL | ± std | Success NLL | Failure NLL | Val SR |
+|:----------:|:-------:|:-----:|:-----------:|:-----------:|:------:|
+| base (step 0) | **2.061** | 0.426 | 1.947 | 2.174 | 57.8% |
+| step 50 | 1.605 | 0.333 | 1.571 | 1.639 | ~78% |
+| step 75 | 1.622 | 0.328 | 1.595 | 1.648 | ~80% |
+| **step 100** | **1.550** | 0.307 | 1.543 | 1.558 | **81.2%** |
+| step 125 | 1.580 | 0.313 | 1.577 | 1.583 | 93.0%→崩溃 |
+| step 150 | 1.601 | 0.289 | 1.594 | 1.608 | 0% (崩溃) |
+
+> **Caveat**：以上 checkpoint 来自 OCAR 训练（weight std=0.007，接近 GRPO）。纯 GRPO 的 degradation 曲线正在通过 observe 实验收集中（2026-04-15 启动）。
+
+**修正后的发现：World Model 呈 "先改善后退化" 的 U 型曲线，而非单调退化。**
+
+1. **Phase 1（step 0→100）：World model 隐式改善。** Obs NLL 从 2.061 降至 1.550（-24.8%）。
+2. **Phase 2（step 100→150）：World model 开始退化。** Obs NLL 从 1.550 回升至 1.601（+3.3%）。
+3. **Success/Failure NLL gap 消失。** 0.227→0.015——surprise 作为区分信号在训练后期自然减弱。
+
+**对 Dual-Token 叙事的影响：** $\mathcal{L}_{\text{WM}}$ 的真正价值：
+1. 将隐式改善变为显式优化
+2. 当 RL 训练震荡时提供稳定锚
+3. 利用被浪费的免费信号
+
+---
+
+## 5. 与所有竞品的定位
+
+### 5.1 vs SDPO (Hübotter et al., 2026)
+
+| 维度 | SDPO | Ours |
+|------|------|------|
+| 哪些 tokens 有梯度 | 仅 action tokens | action + observation tokens |
+| 需要 feedback context | ✅ 需要构造 teacher prompt | ❌ 直接在已有序列上操作 |
+| 额外 forward pass | +1 (teacher) | **零** |
+| 训练场景 | 代码 + 科学推理 | Agent 多步交互 |
+| Agent 验证 | "exciting future work" | 核心实验 |
+| 概念层面 | "用 obs 改善 action 训练" | **"obs 本身也需要训练"** |
+
+### 5.2 vs OPSD (Zhao et al., 2026)
+
+| 维度 | OPSD | Ours |
+|------|------|------|
+| 特权信息 | 标准答案 $y^*$ | 环境反馈 $o_t$ |
+| 需要数据集 | ✅ 需要 $y^*$ | ❌ |
+| Action/Obs 区分 | 不区分（单 turn） | 核心设计 |
+| 适用场景 | 数学推理 | Agent 多步交互 |
+
+### 5.3 统一定位图
+
+```
+                    训练的 token 类型
+
+                    仅 action tokens         action + observation tokens
+                    ─────────────             ──────────────────────────
+额外成本=0           GRPO, OCAR,              ★ Dual-Token Training (Ours) ★
+                    EMPG, GiGPO
+
+额外成本>0           SDPO (+1 fwd),           （无先例）
+                    OpenClaw (+API)
+```
+
+**我们是唯一一个在零额外成本下利用 observation tokens 梯度的方法。**
+
+---
+
+## 6. 已有实验数据与分析总结
+
+### 6.1 来自 OCAR 实验的证据
+
+| 发现 | 数据来源 | 对 Dual-Token 的含义 |
+|------|---------|---------------------|
+| Obs NLL U 型曲线 (2.061→1.550→1.601) | OCAR checkpoints | RL 隐式改善 WM 但不受控 → 显式训练有价值 |
+| Success/Failure NLL gap 消失 (0.227→0.015) | 同上 | WM 均匀化 → obs NLL 作为正则化不依赖此区分 |
+| Surprise ≠ action quality | deep_surprise_analysis | OCAR 根本局限；Dual-Token 不依赖此假设 |
+| 任务异质性 (heat +25pp, clean -15pp) | OCAR v1 per-task | OCAR credit assignment 任务敏感 → Dual-Token 规避 |
+| OCAR peak 82.6% → 崩溃 at step 125+ | OCAR v1 training | RL 不稳定时 WM 跟着退化 → obs NLL 可提供锚 |
+
+### 6.2 正在进行的 Observe 实验（2026-04-15）
+
+**目的**：纯 GRPO + observe-only surprise logging
+
+**wandb**: `grpo_observe_alfworld_20260415_*`, run: `grpo_observe_seed0`
+
+**收集的信号**（不影响训练）：
+- `obs_s_theta_{mean,sum}`: actor NLL (last obs block + all obs)
+- `obs_s_ref_{mean,sum}`: ref model NLL
+- `obs_delta_s_{mean,sum}`: S_theta - S_ref
+- `obs_consecutive_s`: step-to-step surprise delta
+- `obs_step_entropy_{mean,std,min,max}`: action token entropy
+- `obs_wm_A` / `obs_wm_B`: world-model surprise (A=obs+action→obs', B=action→obs')
+
+**对 Dual-Token 实验的指导**：
+1. 如果纯 GRPO 下 obs NLL 也呈 U 型曲线 → 强化 motivation（WM 退化是 RL 通病，非 OCAR 独有）
+2. 如果 obs NLL 单调下降到 plateau → 弱化"防退化"叙事，强化"利用浪费信号 + 正则化"叙事
+3. obs NLL 的绝对值和方差 → 指导 λ 初始值选择
+
+---
+
+## 7. 优化后的实验策略
+
+### 7.1 决策树：根据 Observe 实验结果选择路径
+
+```
+Observe 实验完成
+├── 纯 GRPO 下 obs NLL 呈 U 型曲线？
+│   ├── YES → 最强 motivation: "RL 隐式改善 WM 但后期退化, Dual-Token 锚定"
+│   │         → 执行 Phase 1 全部实验
+│   └── NO (单调下降/plateau)
+│       → 仍然有效的 motivation: "隐式改善不受控 + 浪费免费信号"
+│       → 执行 Phase 1，但调整 paper 叙事
+│
+├── obs NLL 绝对值？
+│   ├── ~1.5-2.0 → λ=0.1 起步（obs NLL 量级与 RL loss 相当）
+│   └── >3.0 → λ=0.05 起步（避免 obs gradient dominate）
+│
+└── 纯 GRPO baseline SR？
+    ├── ~77-80% → 与论文报告一致，fair comparison
+    └── 显著不同 → 需要理解差异原因
+```
+
+### 7.2 Phase 1: 最小核心实验（2-3 天 GPU, 8×A100）
+
+| # | 实验 | Config 关键差异 | 目的 |
+|---|------|----------------|------|
+| 1 | **GRPO baseline** | `wm_loss_coef=0` | 公平对比（如 observe 实验已收集够数据可复用） |
+| 2 | **GRPO + Obs NLL (λ=0.1)** | `wm_loss_coef=0.1` | 核心验证 |
+| 3 | **GRPO + Obs NLL (λ=0.5)** | `wm_loss_coef=0.5` | λ 粗探索 |
+
+**为什么 λ=0.1 起步**：
+- response 部分中 obs tokens 约占 60-70%（multi-turn ALFWorld）
+- per-token 归一化后 obs NLL 量级 ~1.5-2.0
+- RL loss 量级 ~0.1-0.5
+- λ=0.1 确保 obs gradient 不 dominate
+
+**每个 run 需要 log 的额外 metrics**：
+```python
+metrics["actor/wm_loss"]          # obs NLL loss value
+metrics["actor/wm_n_tokens"]      # obs token count per batch
+metrics["actor/wm_loss_ratio"]    # wm_loss / pg_loss (监控两个 loss 的相对量级)
+```
+
+### 7.3 Phase 2: 条件展开
+
+**如果 Phase 1 显示 +2pp 以上 SR improvement：**
+
+| # | 实验 | 目的 |
+|---|------|------|
+| 4 | λ sweep: 0.01, 0.3, 1.0 | 精细调优 |
+| 5 | WebShop 环境 | 泛化性验证 |
+| 6 | GRPO + OCAR v3 (z-norm) + Obs NLL | 组合实验 |
+
+**如果 Phase 1 效果 ≈ 0：**
+
+| # | 救场实验 | 假说 |
+|---|---------|------|
+| A | 仅在失败轨迹上训 obs NLL | 失败轨迹的 obs 信息更有价值 |
+| B | obs NLL 用 KL to ref model 替代 raw NLL | 防止 obs 预测过拟合 |
+| C | 增大 λ 到 1.0-5.0 | 当前 λ 太小，信号不够 |
+
+**如果 Phase 1 效果 < 0：停止 Dual-Token 路线，转向 OCAR v3。**
+
+### 7.4 Phase 3: 分析实验（最关键的图）
+
+| # | 分析 | 预期结果 |
+|---|------|---------|
+| **★1** | **World Model Dynamics 对比曲线** | GRPO 的 obs NLL 先降后升；Dual-Token 的 obs NLL 被锚定在低值 |
+| 2 | wm_loss / pg_loss ratio 随训练变化 | 两个 loss 的相对量级是否稳定 |
+| 3 | Per-task SR breakdown | Dual-Token 是否修复 clean 任务退化 |
+| 4 | 训练收敛速度对比 | Dual-Token 到达同等 SR 所需步数 |
+
+---
+
+## 8. 精确实现指南
+
+### 8.1 文件改动清单
+
+| 文件 | 改动 | 行数 |
+|------|------|:---:|
+| `verl/workers/actor/dp_actor.py` | 加 Dual-Token loss 计算 | +8 |
+| `examples/ocar_trainer/run_alfworld_dual_token.sh` | 新训练脚本 | 新文件 |
+
+### 8.2 dp_actor.py 完整改动
+
+在 `update_policy` 方法中，找到 `loss.backward()` 之前（约 line 456-461），在计算 `policy_loss` 之后、计算 `loss` 之前插入：
+
+```python
+# ===== Dual-Token: World Model Loss on Observation Tokens =====
+wm_loss_coef = self.config.get("wm_loss_coef", 0.0)
+if wm_loss_coef > 0 and multi_turn:
+    attention_mask_resp = attention_mask[:, -response_length:]
+    obs_mask = (attention_mask_resp == 1) & (response_mask == 0)
+    obs_nll = -log_prob * obs_mask.float()
+    n_obs_tokens = obs_mask.sum().clamp(min=1)
+    wm_loss = obs_nll.sum() / n_obs_tokens
+    policy_loss = policy_loss + wm_loss * wm_loss_coef
+    metrics["actor/wm_loss"] = wm_loss.detach().item()
+    metrics["actor/wm_n_tokens"] = n_obs_tokens.detach().item()
+```
+
+**注意事项**：
+- `multi_turn` 变量在该函数中已定义（line ~385: `multi_turn = self.config.get("multi_turn", False)`）
+- `log_prob` 是 `(bsz, response_length)` 来自 `_forward_micro_batch`，包含 response 部分所有 token 的 log prob
+- `response_mask` 在 multi_turn 模式下是 `data["loss_mask"][:, -response_length:]`
+- `obs_mask.float()` 确保与 `log_prob` 类型匹配
+
+### 8.3 训练脚本
+
+基于 `run_alfworld_observe.sh`，主要改动：
+```bash
+# 关键新增
+actor_rollout_ref.actor.wm_loss_coef=0.1  # λ 参数
+
+# 项目名
+trainer.project_name="dual_token_alfworld_$(date +%Y%m%d_%H%M%S)"
+trainer.experiment_name="dual_token_lambda${WM_LAMBDA}_seed${SEED}"
+
+# 保留 observe_surprise 用于 degradation 曲线对比
++algorithm.observe_surprise=true
+```
+
+### 8.4 验证清单
+
+实现后的 sanity check：
+
+- [ ] `wm_loss_coef=0` 时行为与纯 GRPO 完全一致（regression test）
+- [ ] wandb 能看到 `actor/wm_loss` 和 `actor/wm_n_tokens` metrics
+- [ ] `wm_n_tokens > 0`（确认 obs_mask 不为空）
+- [ ] `wm_loss` 量级合理（预期 ~1.5-3.0，与 obs NLL 一致）
+- [ ] 训练速度与 GRPO baseline 差异 < 5%（无额外 forward pass）
+
+---
+
+## 9. 论文结构
+
+```
+Title: "Don't Discard the Observations: Free World-Model Supervision
+       in Agent Reinforcement Learning"
+
+§1 Introduction (1.5p)
+  - P1: Agent RL 有独特的双 token 结构，数学/代码推理不存在
+  - P2: 当前所有方法只训 action tokens，丢弃 obs tokens 梯度
+       → 浪费免费信号 + world model 改善仅为不受控的隐式副产品
+  - P3: 核心方法：加一行 NLL loss on obs tokens
+       → 隐式 world model supervision → PMI → grounded behavior
+  - P4: 实验结果概述
+  - P5: Contributions
+
+§2 Background & Problem (1p)
+  §2.1 Agent RL: Multi-Turn Trajectory Structure
+       - 形式化双 token 结构
+       - 当前 loss_mask 机制
+  §2.2 The Lost Signal: Observation Tokens as Free Supervision
+       - 信息论分析
+
+§3 Method: Dual-Token Training (1.5p)
+  §3.1 The Observation NLL Objective
+       - 公式 + 设计选择（哪些 obs tokens 纳入）
+  §3.2 Why It Works: PMI Decomposition
+       - L_WM ≈ 最大化 action-observation PMI
+  §3.3 Gradient Analysis: Competition or Complementarity?
+       - 定性 + 定量分析两个 loss 的梯度关系
+       - 与 KL penalty 的类比
+  §3.4 Connection to Model-Based RL
+       - vs Dreamer/MuZero 在 token space 的类比
+
+§4 Experiments (2.5p)
+  §4.1 Setup: Environments, Models, Baselines
+  §4.2 Main Results: Task Performance
+  §4.3 World Model Dynamics Analysis ← 核心图（U 型曲线 + 锚定效果）
+  §4.4 Ablation Studies
+  §4.5 Inference-Time Applications (Best-of-N, Phase Transition)
+
+§5 Analysis (0.5p)
+  §5.1 When Does Dual-Token Help Most?
+  §5.2 Failure Cases and Limitations
+
+§6 Related Work (0.5p)
+
+§7 Conclusion (0.25p)
+```
+
+---
+
+## 10. 风险评估
+
+### 10.1 技术风险
+
+| 风险 | 概率 | 严重性 | 缓解 |
+|------|:---:|:---:|------|
+| Obs NLL 效果不显著（隐式改善已足够） | **中** | 高 | λ sweep + 失败轨迹 only + KL 替代 |
+| λ 敏感，需精细调优 | 低 | 中 | Grid search |
+| 模型容量竞争（小模型） | 低 | 低 | 7B+ 容量充裕 |
+| Loss 冲突/角色混乱 | 极低 | 高 | 理论分析 + pretrain 类比 + 消融验证 |
+
+### 10.2 审稿风险
+
+| 风险 | 概率 | 缓解 |
+|------|:---:|------|
+| "太简单了" | 低 | DPO/LoRA 也极简；关键是 insight |
+| "只是 multi-task learning" | 中 | U 型 dynamics + PMI 理论 + agent-specific 结构 |
+| "为什么不用 SDPO" | 中 | 零成本 vs +1 fwd pass；SDPO 自己说 agents 是 future work |
+| "实验环境太简单" | 中 | 加 WebShop；考虑 SWE-bench CLI |
+
+### 10.3 针对"两个 loss 冲突"质疑的完整回应
+
+**Q: 模型本质是 policy，训练它预测环境输出是否角色混乱？**
+
+A: 不会。Chat template 提供硬隔离；base 预训练本身就是 multi-role 的；推理时模型只在 assistant role 下生成。
+
+**Q: 训练时间是否会显著增加？**
+
+A: 不会。logits 已在 forward pass 中计算完毕。唯一新增：读取 obs 位置 logits（已在内存中）+ NLL backward（与 RL backward 合并）。估计额外成本 **< 2% wall-clock time**。
+
+**Q: obs NLL 梯度 dominate 怎么办？**
+
+A: λ 控制 + obs NLL 已做 per-token 归一化。可选动态调节 λ（GradNorm）。
+
+---
+
+## 11. 一句话 Pitch
+
+> "Every agent RL method trains only on action tokens and throws away the gradient signal from observation tokens. We show this is wasteful — while RL training implicitly improves the agent's world model at first, this improvement is uncontrolled and reverses during training instability. Observation prediction provides free, on-policy world-model supervision that makes this improvement explicit and stabilizes training. The fix is one line of code."
+
+---
+
+## Appendix A: 详细数学
+
+### A.1 Dual-Token 训练的梯度分析
+
+总 loss 的梯度：
+
+$$\nabla_\theta \mathcal{L}_{\text{total}} = \underbrace{\nabla_\theta \mathcal{L}_{\text{RL}}}_{\text{action 方向}} + \lambda \underbrace{\nabla_\theta \mathcal{L}_{\text{WM}}}_{\text{observation 方向}}$$
+
+定义两个梯度的 cosine similarity：
+
+$$\cos(\alpha) = \frac{\langle \nabla_\theta \mathcal{L}_{\text{RL}}, \nabla_\theta \mathcal{L}_{\text{WM}} \rangle}{\|\nabla_\theta \mathcal{L}_{\text{RL}}\| \cdot \|\nabla_\theta \mathcal{L}_{\text{WM}}\|}$$
+
+**预期：** $\cos(\alpha) > 0$（正相关），因为好的 action 产生 predictable observations（已有数据 ρ=0.53 支撑）。
+
+### A.2 为什么 Obs NLL ≠ SFT on Observations
+
+1. SFT 在所有 tokens 上做 NLL；我们仅在 obs tokens 上
+2. SFT 的数据是 off-policy 的；我们是 on-policy
+3. SFT 替代 RL；我们是 RL + obs NLL 的 multi-task
+
+### A.3 On-Policy Obs 分布偏移问题
+
+RL 训练初期大部分轨迹失败，obs 分布被失败模式主导。缓解：
+1. 随 policy 改善，obs 分布自然转向成功观测
+2. "学会预测失败后果"也是有用的世界知识
+3. 消融：仅在成功轨迹 vs 全部轨迹上训 obs NLL
+
+### A.4 $\mathcal{L}_{\text{WM}}$ 作为 On-Policy KL Regularizer
+
+$$\mathcal{L}_{\text{WM}} = H(\hat{P}_{\text{env}}, P_\theta)$$
+
+vs KL penalty: $D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})$
+
+| 维度 | KL Penalty | Obs NLL |
+|------|-----------|---------|
+| Reference | 静态 ref model | 动态环境 ground truth |
+| 信息量 | 对环境一无所知 | 直接使用环境反馈 |
+| 性质 | off-policy | on-policy |
+
+---
+
+## Appendix B: 与 OCAR 的关系
+
+| 维度 | OCAR (v1/v2) | OCAR v3 (z-norm) | Dual-Token |
+|------|------|------|------------|
+| Obs signal 用途 | 重新加权 advantage | 同左，但归一化 | 直接作为训练目标 |
+| 改的是什么 | advantage 分配 | advantage 分配 | loss function |
+| 信号假设 | surprise ∝ action quality | 同左（启发式） | 无需此假设 |
+| 崩溃风险 | 高（信号无界增长） | 低（z-score 上界） | 极低（NLL 有界） |
+| 是否可组合 | — | — | ✅ 可叠加 |
+
+**建议**：Dual-Token 为主线叙事。OCAR v3 作为可选组件（实验 #6）。
+
+---
+
+## Appendix C: 关键文件路径
+
+| 文件 | 说明 |
+|------|------|
+| `verl/workers/actor/dp_actor.py` | **唯一需要修改的文件**（加 ~8 行） |
+| `ocar/surprise_observer.py` | observe 模式的 surprise 计算（保留用于 degradation 曲线） |
+| `verl/trainer/ppo/ray_trainer.py` | 训练器（observe surprise 集成已完成，无需改动） |
+| `examples/ocar_trainer/run_alfworld_observe.sh` | observe 实验脚本（可作为 dual_token 脚本模板） |
+| `ocar/eval_world_model_degradation.py` | WM degradation 评估脚本 |
+| `ocar/EXPERIMENT_LOG.md` | 完整实验记录 |

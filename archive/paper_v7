@@ -1,0 +1,478 @@
+# Paper v7: Signal-Triggered Reflection for LLM Agents via Multi-Dimensional Uncertainty
+
+> **核心命题：** LLM agent 在多步任务中存在三种正交的 uncertainty 信号——action entropy (H_a)、observation surprise (S_θ)、policy-vs-reference divergence (ΔS)。这些信号的**时间结构语义不同**：S_θ 的连续高值指示 stuck/looping，ΔS 的连续高值指示 productive exploration。我们提出 STRIDE，一个 training-free 的 test-time 框架，利用多信号联合触发条件反思，仅在 agent 陷入 stuck 且未处于有效探索时干预。
+>
+> **Status:** E1 detector validation in progress (2026-04-19)
+> **Target:** ICLR 2027 / NeurIPS 2026 / EMNLP 2026
+> **与 paper_v6 (Dual-Token) 的关系:** 互补——v6 是 training-based (obs NLL loss)，v7 是 inference-only (obs NLL 做 runtime signal)。两篇可 back-to-back 投。
+
+---
+
+## 0. 与 paper_v6 的继承关系
+
+paper_v6 核心发现在 v7 中被复用：
+1. **Obs NLL 作为隐式 world model quality metric** → v7 直接用它做 runtime stuck indicator
+2. **ΔS = s_theta - s_ref 是比 raw s_theta 更有效的信号** → v7 的 exploration monitor 基于 ΔS
+3. **World model dynamics (U 型曲线)** → v7 可在 related work / motivation 中引用
+
+新增（v7 独有）：
+- **时间结构语义差异**（S_θ consec vs ΔS consec 指向不同状态）
+- **多信号正交性证据**（r=-0.12）
+- **Step-level stuck/useful 标签与 detector F1**
+- **Test-time intervention framework (STRIDE)**
+
+---
+
+## 1. Motivation & Problem
+
+### 1.1 LLM Agent 的 Stuck 问题
+
+在 ALFWorld、WebShop 等多步 agent 任务中，LLM agent 经常陷入以下失败模式：
+- **Action loop**：反复执行相同或相似的动作（"examine sidetable 1" → "go to sidetable 1" → "examine sidetable 1"）
+- **Exploration deadlock**：在无信息的区域持续探索而不转向新区域
+- **Observation blindness**：环境已返回有用信息但 agent 未利用
+
+**定量证据**（grpo_observe_seed0, 768 trajectories）：
+- 11.8% 的 steps 被 rule-based 标签标记为 stuck
+- Fail 轨迹平均 50 步 vs success 平均 15 步 → stuck 是主要 token 消耗来源
+
+### 1.2 现有 Reflection 方法的问题
+
+| 方法 | 触发时机 | 问题 |
+|------|---------|------|
+| Reflexion (Shinn et al. 2023) | 整条轨迹失败后 | 太晚——已浪费全部 token；且需要完整重试 |
+| Self-Refine (Madaan et al. 2023) | 每步或固定间隔 | 太频繁——打断有效探索；增加不必要 token |
+| CRITIC (Gou et al. 2024) | 需要外部工具验证 | 依赖环境支持；不通用 |
+| GUARD (Zhu et al. 2026) | Token-level entropy spike | 仅针对单轮 reasoning；不区分 stuck vs exploration |
+
+**核心缺陷：没有方法区分 "agent 在有效探索但看起来不确定" 和 "agent 真的卡住了"。**
+
+### 1.3 Our Insight
+
+> **同样是 "连续高 uncertainty"，不同信号源指向截然不同的 agent 状态：**
+> - Observation surprise (S_θ) 连续高 → **stuck**（agent 持续预测错环境反馈 → 没学到信息）
+> - Policy-vs-ref divergence (ΔS) 连续高 → **productive exploration**（agent 看到对 ref 模型不寻常但对自己有信息价值的东西）
+> - Action entropy (H_a) 高 → **indecisive**（agent 不确定该做什么）
+
+这三种信号**近似正交**（|r| ≤ 0.12），测量 agent 状态的不同维度。
+
+---
+
+## 2. Three Orthogonal Uncertainty Signals
+
+### 2.1 信号定义
+
+**Signal 1: Action Entropy H_a(t)**
+$$H_a(t) = -\sum_v P_\theta(v | h_t) \log P_\theta(v | h_t)$$
+其中 $v$ 遍历 action token vocabulary，$h_t$ 是 step $t$ 的 history。
+- 实际实现用 per-token entropy 的 mean/max（已有 `entropy_mean`, `entropy_max` 字段）
+- 语义：**agent 对自己的动作有多不确定**
+
+**Signal 2: Observation Surprise S_θ(t)**
+$$S_\theta(t) = -\frac{1}{|o_t|} \sum_{j \in o_t} \log P_\theta(w_j | w_{<j})$$
+- 已有 `s_theta_mean` 字段
+- 语义：**环境反馈与 agent 全历史上下文预期的偏离程度**
+- 注：这是用 LLM 自身作为 implicit world model 的预测误差，零额外成本
+
+**Signal 3: Policy-vs-Reference Divergence ΔS(t)**
+$$\Delta S(t) = S_\theta(t) - S_{\text{ref}}(t)$$
+- 已有 `delta_s_mean` 字段
+- $S_{\text{ref}}$ 来自 frozen reference model（RL 训练前的初始参数）
+- 语义：**RL 训练让 policy 变得比 base model 更会/更不会预测这个 obs**
+- ΔS < 0 → policy 学会了预测这种 obs（internalized）
+- ΔS > 0 → policy 对这种 obs 比 ref 更 surprised（novel for policy specifically）
+
+### 2.2 正交性实证
+
+跨 6 checkpoints (step 20-120), 768 trajectories, 23,936 steps:
+
+| Signal pair | Pearson r |
+|---|---|
+| H_a vs S_θ | +0.04 |
+| H_a vs ΔS | — (需补算) |
+| S_θ vs ΔS | — (ΔS = S_θ - S_ref, 所以相关但不等同) |
+| S_θ vs H_a | +0.04 |
+| ΔS vs H_a | — |
+
+Trajectory-level:
+- corr(mean_H_a, mean_S_θ) = **-0.12** → 近似独立
+
+### 2.3 时间结构语义差异（核心观察）
+
+定义 "高位" = signal > per-checkpoint p85。统计 isolated (run=1) 和 consecutive (run≥2) 高位的 **step-level stuck rate** 和 **useful-exploration rate**：
+
+| Signal | iso stuck% | con stuck% | con/iso stuck ratio | iso useful% | con useful% |
+|---|---|---|---|---|---|
+| S_θ | 12.7% | **17.1%** | **1.35** | 32.0% | 30.0% |
+| ΔS | 7.7% | 8.4% | 1.09 | 36.2% | **45.8%** |
+| EMA(ΔS) | **5.4%** | 8.8% | 1.63 | 49.4% | 46.1% |
+
+**关键发现**：
+1. **S_θ 的 consecutive-high 比 isolated-high stuck 率高 35%** → 连续高 obs-surprise = 卡壳指标
+2. **ΔS 的 consecutive-high 的 useful-exploration 率比 isolated-high 高 27%** → 连续高 ΔS = 有效探索
+3. **EMA(ΔS) 的 isolated-high stuck 率仅 5.4%** → 时间聚合过滤掉了 noise
+
+### 2.4 信号预测能力总结
+
+Step-level prediction:
+
+| Signal | Stuck AUC | |AUC-0.5| | Useful AUC | |AUC-0.5| |
+|---|---|---|---|---|
+| S_θ | 0.58 | 0.08 | 0.47 | 0.03 |
+| ΔS | 0.49 | 0.01 | **0.58** | **0.08** |
+| H_a (ent_mean) | **0.60** | **0.10** | 0.40 | **0.10** |
+| EMA(ΔS, λ=0.5) | 0.48 | 0.02 | **0.59** | **0.09** |
+| win3(ΔS) | 0.48 | 0.02 | **0.59** | **0.09** |
+
+Early-window prediction (AUC using first 5 steps only → no length confound):
+| Signal | AUC (5-step) | |AUC-0.5| |
+|---|---|---|
+| ΔS | **0.73** | **0.23** |
+| H_a | 0.16 | **0.34** |
+| S_θ | 0.55 | 0.05 |
+
+---
+
+## 3. Method: STRIDE
+
+### 3.1 Architecture
+
+```
+At each step t:
+  ┌──────────────────────────────────────────┐
+  │ 1. Agent generates action a_t            │
+  │ 2. Environment returns observation o_t   │
+  │ 3. Compute S_θ(t), ΔS(t), H_a(t)        │
+  │ 4. Update temporal aggregates:           │
+  │    - EMA_S: exponential moving avg of S_θ│
+  │    - EMA_Δ: exponential moving avg of ΔS │
+  │    - run_S: consecutive high S_θ count   │
+  │ 5. Check trigger conditions              │
+  │ 6. If triggered → inject reflection      │
+  └──────────────────────────────────────────┘
+```
+
+### 3.2 Trigger Conditions
+
+**Stuck Detector:**
+```
+stuck(t) = (run_S(t) ≥ k_S)  AND  (H_a(t) > τ_H)
+```
+- `run_S(t)`: 连续 S_θ > τ_S 的步数
+- k_S = 3 (default): 需要至少 3 步连续高 obs surprise
+- τ_H: action entropy 阈值（需要 agent 同时 indecisive）
+
+**Exploration Guard:**
+```
+exploring(t) = (EMA_Δ(t) > τ_Δ)
+```
+- 如果 ΔS 的 EMA 仍然高，说明 agent 在吸收 policy-specific 新信息 → 不干预
+
+**Final Trigger:**
+```
+reflect(t) = stuck(t)  AND  NOT exploring(t)
+```
+
+### 3.3 Reflection Intervention
+
+当 `reflect(t) = True` 时，在 agent 的下一步输入中插入 reflection prompt：
+
+**Option A: Self-Diagnosis Prompt**
+```
+[System] You appear to be stuck. In the last {k} steps, the environment
+responses were unexpected and you seem uncertain about your actions.
+Before your next action, briefly:
+1. What is your current goal?
+2. What have you tried that didn't work?
+3. What is a fundamentally different approach?
+```
+
+**Option B: History Compression**
+将最近 k 步压缩为一句总结，替换原始长 history：
+```
+[System] Summary of last {k} steps: You tried {action_summary} but made
+no progress. The environment showed {obs_summary}. Try a different strategy.
+```
+
+**Option C: Action Masking**（不修改 prompt，修改 sampling）
+在 logit 上 mask 掉过去 k 步已用过的 action verb，强制采样新动作。
+
+**Option D: Temperature Boost**
+触发后 n 步内 temperature 从 T → T+δ，增加随机性。
+
+### 3.4 信号计算成本
+
+| 信号 | 额外 forward pass | 额外推理延迟 |
+|---|---|---|
+| H_a | 0（生成 action 时已有 logits） | ~0 |
+| S_θ | 0（处理 obs tokens 时已有 logits） | ~0 |
+| ΔS | **1**（需 ref model forward on obs）| 取决于 ref model 部署 |
+
+**如果 ref model 不可用**：只用 H_a + S_θ 的两信号版本（仍有 stuck detection 能力）。
+**如果 ref model 是小模型**：比如 Qwen2.5-1.5B 作为 ref，开销极小。
+
+### 3.5 超参数
+
+| 参数 | 默认值 | 来源 |
+|---|---|---|
+| τ_S | p85 of S_θ over first 5 steps | 自适应（per-episode calibration） |
+| τ_H | p85 of H_a over first 5 steps | 同上 |
+| τ_Δ | p85 of ΔS over first 5 steps | 同上 |
+| k_S | 3 | 消融实验选取 |
+| λ_EMA | 0.5 | 消融实验选取 |
+
+**Per-episode calibration**：用前 5 步数据自动设定阈值，避免跨环境手调。
+
+---
+
+## 4. Experimental Plan
+
+### 4.1 E1: Detector Validation (用现有 observe_trajectories.json)
+
+**已有数据**：6 checkpoints × 128 trajectories = 768 trajs, 23,936 steps
+
+**Step-level ground truth labels (rule-based, no trajectory outcome leakage)**:
+- **Stuck**: 未来 3 步内 ≥2 次 "Nothing happens" OR 未来 4 步内同动作重复 ≥3 次
+- **Useful exploration**: 未来 3 步内出现 ≥3 个历史未见 obs tokens
+
+**Detector baselines**:
+
+| Detector | 描述 |
+|---|---|
+| Random | 随机触发，匹配频率 |
+| Action-Repetition | 最近 3 步有 ≥2 次重复动作 |
+| Single-step H_a | H_a > τ |
+| Single-step S_θ | S_θ > τ |
+| EDIS-style (entropy dynamics) | Token-level entropy instability score（单步特征） |
+| **STRIDE 2-signal** | stuck = run_S ≥ k AND H_a > τ |
+| **STRIDE 3-signal** | stuck AND NOT exploring |
+
+**Metrics**: Precision / Recall / F1 对 stuck label；同时报告 useful label 的 false positive rate（不应把 useful 步骤误判为 stuck）。
+
+### 4.2 E2: End-to-End Intervention
+
+**Environments**: ALFWorld, WebShop, ScienceWorld (3 环境)
+
+**Models** (frozen, no training):
+- Qwen2.5-7B-Instruct
+- Llama-3.1-8B-Instruct
+- GPT-4o-mini (API, 闭源泛化验证)
+
+**Baselines**:
+
+| Method | Reflection timing |
+|---|---|
+| Vanilla ReAct | Never |
+| Reflexion (per-episode) | After full episode failure → retry |
+| Self-Refine (fixed interval) | Every N steps |
+| Random-trigger Reflection | Random timing, matched frequency |
+| Always-Reflect | Every step |
+| **STRIDE (ours)** | Multi-signal conditioned |
+
+**Metrics**:
+- Success rate (SR)
+- Average episode length (avg steps)
+- Reflection tokens used (efficiency)
+- Token efficiency = SR / total_tokens
+
+### 4.3 E3: Ablation Studies
+
+| Ablation | 验证什么 |
+|---|---|
+| Only H_a trigger | 单信号 vs 多信号 |
+| Only S_θ temporal trigger | 时间结构的贡献 |
+| Only ΔS exploration guard | Guard 是否减少 false positives |
+| k_S ∈ {2, 3, 4, 5} | Run-length 阈值敏感性 |
+| λ_EMA ∈ {0.3, 0.5, 0.7, 0.9} | EMA 衰减敏感性 |
+| τ 自适应 vs 固定 | Per-episode calibration 的价值 |
+| Reflection template A/B/C/D | 干预方式对比 |
+
+### 4.4 E4: Analysis & Visualization
+
+1. **Signal orthogonality heatmap**：3×3 信号相关矩阵 + scatter plots
+2. **Temporal structure diagram**：一条 success 和一条 fail 轨迹的 S_θ / ΔS / H_a 时间序列，标注 STRIDE 触发点
+3. **Intervention effect case study**：STRIDE 触发前后的行为变化（具体 obs + action 对比）
+4. **Stuck detection ROC curves**：各 detector 的 ROC 对比图
+5. **Token efficiency scatter**：SR vs total tokens per episode，各方法对比
+
+---
+
+## 5. 与竞品的精确定位
+
+### 5.1 vs EDIS / GUARD (Zhu et al. 2026)
+
+| 维度 | EDIS / GUARD | STRIDE |
+|---|---|---|
+| 信号来源 | Agent 自己生成的 CoT tokens | **环境返回的 observation tokens** |
+| 任务类型 | 单轮推理 (math, code) | **多步 agent + 环境交互** |
+| 信号维度 | 单一 (token entropy) | **三种正交信号** |
+| 时间结构利用 | ✅ Burst/peak-valley | ✅ **信号依赖的时间语义** |
+| 干预方式 | Branching/resampling | **Reflection injection** |
+
+**核心差异**：EDIS/GUARD 的信号来自模型自身（self-generated），我们的来自**环境**（external）。这在概念上完全不同——前者是"模型对自己犹豫"，后者是"模型对环境犯错"。
+
+### 5.2 vs SELAUR (Zhang et al. 2026)
+
+| 维度 | SELAUR | STRIDE |
+|---|---|---|
+| 阶段 | Training-based (RL reward) | **Inference-only** |
+| 信号 | Action-side uncertainty only | **Action + Observation + Reference** |
+| 时间结构 | 未使用 | ✅ |
+| 需要训练 | ✅ 需要 RL 重训 | **❌ 即插即用** |
+
+### 5.3 vs Reflexion / Self-Refine
+
+| 维度 | Reflexion | Self-Refine | STRIDE |
+|---|---|---|---|
+| 触发时机 | Episode 失败后 | 固定间隔 | **信号条件触发** |
+| Token 效率 | 极差（重跑整条） | 差（每步额外开销） | **高（仅在 stuck 时）** |
+| 是否打断 exploration | N/A | ✅ | **❌（有 exploration guard）** |
+
+### 5.4 定位图
+
+```
+                    触发信号类型
+                    无信号 / 固定规则        Model-internal        Model + Environment
+                    ──────────────         ──────────────        ─────────────────
+Inference-only      Reflexion (post-hoc)   GUARD (entropy)       ★ STRIDE (ours) ★
+                    Self-Refine (interval)  EDIS (dynamics)
+
+Training-based      GRPO, PPO              RND, ICM              SELAUR (action unc.)
+                                                                  Dual-Token (v6, ours)
+```
+
+---
+
+## 6. 预期结果与风险
+
+### 6.1 预期 E1 结果
+
+| Detector | Stuck F1 (预期) | Useful FP rate (预期) |
+|---|---|---|
+| Random | ~0.12 | ~0.30 |
+| Action-Repetition | ~0.25 | ~0.10 |
+| Single H_a | ~0.20 | ~0.25 |
+| Single S_θ | ~0.15 | ~0.20 |
+| **STRIDE 2-signal** | ~0.25 | ~0.10 |
+| **STRIDE 3-signal** | **~0.28** | **~0.05** |
+
+预期 STRIDE 3-signal 的核心优势不在 F1（可能仅比 action-repetition 略高），而在 **useful FP rate 极低**——不会打断 productive exploration。
+
+### 6.2 预期 E2 结果
+
+| Method | ALFWorld SR | Avg Steps | Reflection Tokens |
+|---|---|---|---|
+| Vanilla ReAct | ~50% | ~35 | 0 |
+| Reflexion | ~65% | ~70 (含重试) | 很多 |
+| Self-Refine (every 5 steps) | ~55% | ~40 | 中等 |
+| **STRIDE** | **~60-65%** | **~30** | **很少** |
+
+**核心卖点**：STRIDE 的 SR 可能不是最高（Reflexion 有重试优势），但 **token efficiency (SR/tokens) 最优**。
+
+### 6.3 风险
+
+| 风险 | 概率 | 应对 |
+|---|---|---|
+| Stuck detector F1 不如 action-repetition | **中** | 如此则论文 focus 转向"useful FP rate"和 2D 分析 |
+| Intervention 增量 <3% SR | **中-高** | E1 分析本身足够 findings paper |
+| 审稿人说"action repetition 更简单" | **高** | 用 useful FP rate 差距反驳 + 定性 case 展示 |
+| GUARD 在审稿期间扩展到 agent | **低** | 先投，速度是防御 |
+
+---
+
+## 7. 论文结构
+
+```
+Title: "When Should an LLM Agent Reflect? Signal-Conditioned
+       Self-Correction via Multi-Dimensional Uncertainty"
+
+§1 Introduction (1.5p)
+  - LLM agent stuck problem + token waste
+  - Existing reflection: too late or too frequent
+  - Our insight: 3 orthogonal signals with different temporal semantics
+  - STRIDE: signal-conditioned reflection
+  - Results overview
+
+§2 Background (0.75p)
+  §2.1 LLM Agent Decision Loop
+  §2.2 Self-Correction Methods (Reflexion, Self-Refine, CRITIC)
+  §2.3 Uncertainty in LLMs (entropy, surprise, prediction error)
+
+§3 Three Orthogonal Uncertainty Signals (1.5p)
+  §3.1 Definitions: H_a, S_θ, ΔS
+  §3.2 Orthogonality Evidence
+  §3.3 Temporal Structure Semantics ← 核心观察
+       (S_θ consec → stuck; ΔS consec → productive exploration)
+  §3.4 Why Different Signals Measure Different Things
+       (Action uncertainty ≠ environmental surprise ≠ learning signal)
+
+§4 STRIDE: Signal-Triggered Reflection (1.25p)
+  §4.1 Stuck Detector (S_θ temporal + H_a)
+  §4.2 Exploration Guard (ΔS temporal)
+  §4.3 Reflection Injection Templates
+  §4.4 Per-Episode Calibration
+
+§5 Experiments (2.5p)
+  §5.1 E1: Detector Validation
+  §5.2 E2: End-to-End Evaluation
+  §5.3 E3: Ablation Studies
+  §5.4 E4: Case Studies & Visualization
+
+§6 Related Work (0.5p)
+
+§7 Discussion & Limitations (0.5p)
+
+§8 Conclusion (0.25p)
+```
+
+---
+
+## 8. 实现计划
+
+### 8.1 Week 1: E1 Detector Validation (CPU-only, 现有数据)
+
+**脚本**: `ocar/stride_detector_validation.py`
+
+输入：`observe_trajectories.json` × 6 checkpoints
+输出：
+1. Stuck detection F1/Precision/Recall for all detectors
+2. Useful-exploration false positive rate
+3. 3 key figures (PNG)
+4. Case study examples (markdown)
+
+### 8.2 Week 2: E2 Minimal Intervention (1 GPU, ALFWorld only)
+
+**脚本**: `ocar/stride_inference.py`
+
+- 用 frozen Qwen2.5-7B-Instruct
+- 50 ALFWorld episodes
+- Compare: Vanilla vs Random-reflect vs Fixed-interval vs STRIDE
+- **不需要 RL 训练，不碰 GPU 训练 jobs**
+
+### 8.3 Week 3-4: Scale up E2 + E3
+
+- 加 WebShop + ScienceWorld
+- 加 Llama-3.1-8B
+- 跑 ablations
+- 写 paper
+
+---
+
+## 9. 已有实验数据汇总（可直接引用）
+
+### 来自 EXPERIMENT_LOG.md §4
+
+| 事实 | 数字 | 来源 |
+|---|---|---|
+| 全集 N | 768 traj / 23,936 steps / 6 ckpts | grpo_observe_seed0 |
+| S_θ vs H_a 相关性 | r = +0.04 (step), -0.12 (traj) | §4.2 |
+| S_θ 单独 AUC | 0.55 (traj-level) | §4.2 |
+| ΔS 单独 AUC | 0.77 (traj-level) | §4.2 |
+| H_a 单独 AUC | 0.94 (traj-level, 受长度混淆) | §4.2 |
+| 前 5 步 ΔS AUC | 0.73 (长度控制) | §4.4 |
+| 前 5 步 H_a |AUC-0.5| | 0.34 (长度控制) | §4.4 |
+| S_θ consec stuck 率 | 17.1% vs iso 12.7% (1.35x) | §4.6 |
+| ΔS consec useful 率 | 45.8% vs iso 36.2% (1.27x) | §4.6 |
+| Stuck label 占比 | 11.8% | §4.5 |
+| Useful label 占比 | 29.9% | §4.5 |
+| 长度混淆 | n_steps AUC = 0.9993 | §4.3 |

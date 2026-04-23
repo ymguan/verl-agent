@@ -9,6 +9,15 @@
 **/playground
 **/wandb
 
+# project-specific large assets (not for GitHub)
+alfworld_data/
+merged_models/
+*.log
+.claude/
+
+# allow archive tar.gz (logs of terminated surprise line, retained for provenance)
+!archive/*.tar.gz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

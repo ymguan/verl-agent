@@ -1,0 +1,112 @@
+{"id": "orig_0", "split": "original", "text": "Nothing happens."}
+{"id": "shuf_0", "split": "shuffled", "text": "Nothing happens."}
+{"id": "swap_0", "split": "swapped", "text": "Nothing happens."}
+{"id": "nons_0", "split": "nonsense", "text": "Nothing happens."}
+{"id": "orig_1", "split": "original", "text": "On the cabinet 1, you see a glassbottle 2."}
+{"id": "shuf_1", "split": "shuffled", "text": "On the cabinet 1, you see a glassbottle 2."}
+{"id": "swap_1", "split": "swapped", "text": "On the cabinet 1, you see a saltshaker 2."}
+{"id": "nons_1", "split": "nonsense", "text": "On the cabinet 1, you see a soapbar 1."}
+{"id": "orig_2", "split": "original", "text": "On the desk 1, you see a bowl 1, a cd 2, a creditcard 2, a desklamp 1, a keychain 1, a laptop 2, a pen 2, and a pencil 2."}
+{"id": "shuf_2", "split": "shuffled", "text": "On the desk 1, you see a bowl 1, a pen 2, a cd 2, a creditcard 2, a laptop 2, a desklamp 1, a pencil 2, and a keychain 1."}
+{"id": "swap_2", "split": "swapped", "text": "On the desk 1, you see a keychain 1, a vase 2, a egg 2, a pencil 1, a dishsponge 1, a spoon 2, a cd 2, and a potato 2."}
+{"id": "nons_2", "split": "nonsense", "text": "On the desk 1, you see a lettuce 2, a pen 1, a cellphone 3, a spraybottle 1, a plate 4, a pencil 2, a watch 4, and a spatula 3."}
+{"id": "orig_3", "split": "original", "text": "On the desk 1, you see a bowl 2, a cd 1, a desklamp 1, and a laptop 1."}
+{"id": "shuf_3", "split": "shuffled", "text": "On the desk 1, you see a cd 1, a laptop 1, a desklamp 1, and a bowl 2."}
+{"id": "swap_3", "split": "swapped", "text": "On the desk 1, you see a cloth 2, a soapbottle 1, a apple 1, and a watch 1."}
+{"id": "nons_3", "split": "nonsense", "text": "On the desk 1, you see a pillow 2, a pencil 1, a kettle 2, and a laptop 2."}
+{"id": "orig_4", "split": "original", "text": "You arrive at bed 1. On the bed 1, you see a book 1, a pillow 3, a pillow 2, and a pillow 1."}
+{"id": "shuf_4", "split": "shuffled", "text": "You arrive at bed 1. On the bed 1, you see a pillow 3, a pillow 2, a book 1, and a pillow 1."}
+{"id": "swap_4", "split": "swapped", "text": "You arrive at bed 1. On the bed 1, you see a pencil 1, a vase 3, a towel 2, and a creditcard 1."}
+{"id": "nons_4", "split": "nonsense", "text": "You arrive at bed 1. On the bed 1, you see a pen 3, a cup 3, a vase 2, and a watch 3."}
+{"id": "orig_5", "split": "original", "text": "You arrive at cabinet 1. On the cabinet 1, you see a glassbottle 2."}
+{"id": "shuf_5", "split": "shuffled", "text": "You arrive at cabinet 1. On the cabinet 1, you see a glassbottle 2."}
+{"id": "swap_5", "split": "swapped", "text": "You arrive at cabinet 1. On the cabinet 1, you see a spoon 2."}
+{"id": "nons_5", "split": "nonsense", "text": "You arrive at cabinet 1. On the cabinet 1, you see a cloth 4."}
+{"id": "orig_6", "split": "original", "text": "You arrive at cabinet 1. The cabinet 1 is open. In it, you see a cloth 1."}
+{"id": "shuf_6", "split": "shuffled", "text": "You arrive at cabinet 1. The cabinet 1 is open. In it, you see a cloth 1."}
+{"id": "swap_6", "split": "swapped", "text": "You arrive at cabinet 1. The cabinet 1 is open. In it, you see a pillow 1."}
+{"id": "nons_6", "split": "nonsense", "text": "You arrive at cabinet 1. The cabinet 1 is open. In it, you see a laptop 3."}
+{"id": "orig_7", "split": "original", "text": "You arrive at cabinet 2. The cabinet 2 is open. In it, you see nothing."}
+{"id": "shuf_7", "split": "shuffled", "text": "You arrive at cabinet 2. The cabinet 2 is open. In it, you see nothing."}
+{"id": "swap_7", "split": "swapped", "text": "You arrive at cabinet 2. The cabinet 2 is open. In it, you see nothing."}
+{"id": "nons_7", "split": "nonsense", "text": "You arrive at cabinet 2. The cabinet 2 is open. In it, you see nothing."}
+{"id": "orig_8", "split": "original", "text": "You arrive at countertop 1. On the countertop 1, you see a fork 2, and a mug 2."}
+{"id": "shuf_8", "split": "shuffled", "text": "You arrive at countertop 1. On the countertop 1, you see a mug 2, and a fork 2."}
+{"id": "swap_8", "split": "swapped", "text": "You arrive at countertop 1. On the countertop 1, you see a keychain 2, and a glassbottle 2."}
+{"id": "nons_8", "split": "nonsense", "text": "You arrive at countertop 1. On the countertop 1, you see a butterknife 3, and a spraybottle 1."}
+{"id": "orig_9", "split": "original", "text": "You arrive at countertop 1. On the countertop 1, you see a soapbar 1, and a spraybottle 1."}
+{"id": "shuf_9", "split": "shuffled", "text": "You arrive at countertop 1. On the countertop 1, you see a spraybottle 1, and a soapbar 1."}
+{"id": "swap_9", "split": "swapped", "text": "You arrive at countertop 1. On the countertop 1, you see a dishsponge 1, and a fork 1."}
+{"id": "nons_9", "split": "nonsense", "text": "You arrive at countertop 1. On the countertop 1, you see a butterknife 1, and a vase 4."}
+{"id": "orig_10", "split": "original", "text": "You arrive at countertop 2. On the countertop 2, you see a butterknife 1, a cellphone 1, a mug 1, a peppershaker 1, a potato 2, a potato 1, a soapbottle 1, a spoon 1, and a vase 1."}
+{"id": "shuf_10", "split": "shuffled", "text": "You arrive at countertop 2. On the countertop 2, you see a butterknife 1, a soapbottle 1, a mug 1, a peppershaker 1, a potato 1, a cellphone 1, a spoon 1, a potato 2, and a vase 1."}
+{"id": "swap_10", "split": "swapped", "text": "You arrive at countertop 2. On the countertop 2, you see a spoon 1, a towel 1, a pot 1, a cloth 1, a glassbottle 2, a pillow 1, a cd 1, a pan 1, and a potato 1."}
+{"id": "nons_10", "split": "nonsense", "text": "You arrive at countertop 2. On the countertop 2, you see a pillow 2, a laptop 1, a mug 1, a knife 3, a fork 3, a soapbottle 1, a creditcard 2, a knife 1, and a vase 1."}
+{"id": "orig_11", "split": "original", "text": "You arrive at desk 1. On the desk 1, you see a alarmclock 2, a bowl 1, a desklamp 1, and a laptop 1."}
+{"id": "shuf_11", "split": "shuffled", "text": "You arrive at desk 1. On the desk 1, you see a bowl 1, a desklamp 1, a laptop 1, and a alarmclock 2."}
+{"id": "swap_11", "split": "swapped", "text": "You arrive at desk 1. On the desk 1, you see a cup 2, a soapbar 1, a cloth 1, and a soapbottle 1."}
+{"id": "nons_11", "split": "nonsense", "text": "You arrive at desk 1. On the desk 1, you see a cup 1, a bread 2, a glassbottle 1, and a spraybottle 2."}
+{"id": "orig_12", "split": "original", "text": "You arrive at desk 1. On the desk 1, you see a bowl 1, a cd 2, a creditcard 2, a desklamp 1, a keychain 1, a laptop 2, a pen 2, and a pencil 2."}
+{"id": "shuf_12", "split": "shuffled", "text": "You arrive at desk 1. On the desk 1, you see a cd 2, a pen 2, a creditcard 2, a desklamp 1, a keychain 1, a pencil 2, a laptop 2, and a bowl 1."}
+{"id": "swap_12", "split": "swapped", "text": "You arrive at desk 1. On the desk 1, you see a lettuce 1, a cloth 2, a mug 2, a cellphone 1, a saltshaker 1, a glassbottle 2, a knife 2, and a pen 2."}
+{"id": "nons_12", "split": "nonsense", "text": "You arrive at desk 1. On the desk 1, you see a glassbottle 1, a tomato 4, a butterknife 1, a saltshaker 2, a lettuce 3, a spraybottle 2, a keychain 1, and a fork 2."}
+{"id": "orig_13", "split": "original", "text": "You arrive at desk 1. On the desk 1, you see a bowl 2, a cd 1, a desklamp 1, and a laptop 1."}
+{"id": "shuf_13", "split": "shuffled", "text": "You arrive at desk 1. On the desk 1, you see a bowl 2, a cd 1, a laptop 1, and a desklamp 1."}
+{"id": "swap_13", "split": "swapped", "text": "You arrive at desk 1. On the desk 1, you see a cup 2, a spraybottle 1, a kettle 1, and a apple 1."}
+{"id": "nons_13", "split": "nonsense", "text": "You arrive at desk 1. On the desk 1, you see a spraybottle 4, a tomato 3, a plate 4, and a lettuce 2."}
+{"id": "orig_14", "split": "original", "text": "You arrive at desk 1. On the desk 1, you see a desklamp 1, a keychain 1, and a pencil 1."}
+{"id": "shuf_14", "split": "shuffled", "text": "You arrive at desk 1. On the desk 1, you see a keychain 1, a desklamp 1, and a pencil 1."}
+{"id": "swap_14", "split": "swapped", "text": "You arrive at desk 1. On the desk 1, you see a spoon 1, a cloth 1, and a pot 1."}
+{"id": "nons_14", "split": "nonsense", "text": "You arrive at desk 1. On the desk 1, you see a butterknife 3, a dishsponge 2, and a spraybottle 3."}
+{"id": "orig_15", "split": "original", "text": "You arrive at desk 2. On the desk 2, you see a alarmclock 3, a cd 2, a cd 1, a cellphone 3, a cellphone 2, a creditcard 1, and a mug 1."}
+{"id": "shuf_15", "split": "shuffled", "text": "You arrive at desk 2. On the desk 2, you see a alarmclock 3, a cellphone 3, a mug 1, a cd 2, a creditcard 1, a cd 1, and a cellphone 2."}
+{"id": "swap_15", "split": "swapped", "text": "You arrive at desk 2. On the desk 2, you see a potato 3, a spatula 2, a creditcard 1, a apple 3, a plate 2, a dishsponge 1, and a spoon 1."}
+{"id": "nons_15", "split": "nonsense", "text": "You arrive at desk 2. On the desk 2, you see a pillow 2, a laptop 2, a spatula 4, a soapbar 1, a saltshaker 4, a butterknife 2, and a spatula 1."}
+{"id": "orig_16", "split": "original", "text": "You arrive at desk 2. On the desk 2, you see a book 2, a mug 1, and a pencil 3."}
+{"id": "shuf_16", "split": "shuffled", "text": "You arrive at desk 2. On the desk 2, you see a pencil 3, a book 2, and a mug 1."}
+{"id": "swap_16", "split": "swapped", "text": "You arrive at desk 2. On the desk 2, you see a spatula 2, a watch 1, and a towel 3."}
+{"id": "nons_16", "split": "nonsense", "text": "You arrive at desk 2. On the desk 2, you see a watch 1, a butterknife 4, and a pencil 3."}
+{"id": "orig_17", "split": "original", "text": "You arrive at drawer 1. The drawer 1 is closed."}
+{"id": "shuf_17", "split": "shuffled", "text": "You arrive at drawer 1. The drawer 1 is closed."}
+{"id": "swap_17", "split": "swapped", "text": "You arrive at drawer 1. The drawer 1 is closed."}
+{"id": "nons_17", "split": "nonsense", "text": "You arrive at drawer 1. The drawer 1 is closed."}
+{"id": "orig_18", "split": "original", "text": "You arrive at fridge 1. The fridge 1 is closed."}
+{"id": "shuf_18", "split": "shuffled", "text": "You arrive at fridge 1. The fridge 1 is closed."}
+{"id": "swap_18", "split": "swapped", "text": "You arrive at fridge 1. The fridge 1 is closed."}
+{"id": "nons_18", "split": "nonsense", "text": "You arrive at fridge 1. The fridge 1 is closed."}
+{"id": "orig_19", "split": "original", "text": "You arrive at fridge 1. The fridge 1 is open. In it, you see a apple 2, a apple 1, a bowl 3, a bowl 2, a egg 2, a lettuce 1, and a tomato 1."}
+{"id": "shuf_19", "split": "shuffled", "text": "You arrive at fridge 1. The fridge 1 is open. In it, you see a apple 1, a bowl 3, a egg 2, a lettuce 1, a apple 2, a bowl 2, and a tomato 1."}
+{"id": "swap_19", "split": "swapped", "text": "You arrive at fridge 1. The fridge 1 is open. In it, you see a egg 2, a bread 1, a soapbottle 3, a spoon 2, a plate 2, a apple 1, and a dishsponge 1."}
+{"id": "nons_19", "split": "nonsense", "text": "You arrive at fridge 1. The fridge 1 is open. In it, you see a apple 1, a towel 1, a kettle 1, a kettle 3, a mug 2, a creditcard 4, and a saltshaker 1."}
+{"id": "orig_20", "split": "original", "text": "You arrive at shelf 1. On the shelf 1, you see a alarmclock 1, a keychain 2, and a pencil 1."}
+{"id": "shuf_20", "split": "shuffled", "text": "You arrive at shelf 1. On the shelf 1, you see a pencil 1, a keychain 2, and a alarmclock 1."}
+{"id": "swap_20", "split": "swapped", "text": "You arrive at shelf 1. On the shelf 1, you see a spatula 1, a cup 2, and a mug 1."}
+{"id": "nons_20", "split": "nonsense", "text": "You arrive at shelf 1. On the shelf 1, you see a dishsponge 3, a cup 2, and a mug 1."}
+{"id": "orig_21", "split": "original", "text": "You arrive at shelf 1. On the shelf 1, you see a bowl 1."}
+{"id": "shuf_21", "split": "shuffled", "text": "You arrive at shelf 1. On the shelf 1, you see a bowl 1."}
+{"id": "swap_21", "split": "swapped", "text": "You arrive at shelf 1. On the shelf 1, you see a butterknife 1."}
+{"id": "nons_21", "split": "nonsense", "text": "You arrive at shelf 1. On the shelf 1, you see a butterknife 2."}
+{"id": "orig_22", "split": "original", "text": "You arrive at sinkbasin 1. On the sinkbasin 1, you see nothing."}
+{"id": "shuf_22", "split": "shuffled", "text": "You arrive at sinkbasin 1. On the sinkbasin 1, you see nothing."}
+{"id": "swap_22", "split": "swapped", "text": "You arrive at sinkbasin 1. On the sinkbasin 1, you see nothing."}
+{"id": "nons_22", "split": "nonsense", "text": "You arrive at sinkbasin 1. On the sinkbasin 1, you see nothing."}
+{"id": "gen_0", "split": "generic", "text": "In the library, you will find a book, a lamp, a desk, and a chair."}
+{"id": "gen_1", "split": "generic", "text": "The museum exhibit contains three paintings, two sculptures, and a bronze statue."}
+{"id": "gen_2", "split": "generic", "text": "On the table, he placed a cup, a plate, a spoon, and a napkin."}
+{"id": "gen_3", "split": "generic", "text": "She opened the drawer. The drawer was empty."}
+{"id": "gen_4", "split": "generic", "text": "The small garden had roses, tulips, daisies, and sunflowers blooming together."}
+{"id": "gen_5", "split": "generic", "text": "He walked into the kitchen. On the counter, he saw bread, butter, jam, and tea."}
+{"id": "gen_6", "split": "generic", "text": "Nothing unusual happened during the meeting that afternoon."}
+{"id": "gen_7", "split": "generic", "text": "The box was closed. Inside, there were letters, photographs, and old postcards."}
+{"id": "gen_8", "split": "generic", "text": "At the park, children played with balls, kites, frisbees, and jump ropes."}
+{"id": "gen_9", "split": "generic", "text": "She arrived at the station. The platform was crowded with passengers and luggage."}
+{"id": "gen_10", "split": "generic", "text": "The classroom contained desks, chairs, a whiteboard, and several bookshelves."}
+{"id": "gen_11", "split": "generic", "text": "He checked the fridge. Inside were milk, cheese, eggs, and some vegetables."}
+{"id": "gen_12", "split": "generic", "text": "The closet was open. In it, you see coats, shirts, and folded sweaters."}
+{"id": "gen_13", "split": "generic", "text": "On the windowsill, there were flowerpots, a small cactus, and a watering can."}
+{"id": "gen_14", "split": "generic", "text": "She walked to the desk. On the desk, she saw a laptop, a notebook, and a pen."}
+{"id": "gen_15", "split": "generic", "text": "The cupboard is closed. The cupboard has a wooden handle and brass hinges."}
+{"id": "gen_16", "split": "generic", "text": "He placed the keys, wallet, phone, and glasses on the entryway table."}
+{"id": "gen_17", "split": "generic", "text": "The bathroom had towels, soap, a toothbrush, shampoo, and a hair dryer."}
+{"id": "gen_18", "split": "generic", "text": "Inside the attic, you could see dust, cobwebs, old boxes, and forgotten toys."}
+{"id": "gen_19", "split": "generic", "text": "Nothing was left in the room except a single chair near the window."}

@@ -1,0 +1,782 @@
+[
+  {
+    "mean_nll": 2.060546875,
+    "std_nll": 0.42619944342546,
+    "n_trajs": 20,
+    "success_nll": 1.946875,
+    "failure_nll": 2.17421875,
+    "per_traj": [
+      {
+        "traj_id": "6d1c9276",
+        "success": true,
+        "n_obs_tokens": 488,
+        "obs_nll": 1.265625
+      },
+      {
+        "traj_id": "c4d79554",
+        "success": true,
+        "n_obs_tokens": 81,
+        "obs_nll": 1.8125
+      },
+      {
+        "traj_id": "53a4b7f0",
+        "success": true,
+        "n_obs_tokens": 222,
+        "obs_nll": 2.171875
+      },
+      {
+        "traj_id": "257aaf18",
+        "success": true,
+        "n_obs_tokens": 257,
+        "obs_nll": 2.140625
+      },
+      {
+        "traj_id": "707ed01d",
+        "success": true,
+        "n_obs_tokens": 293,
+        "obs_nll": 1.3984375
+      },
+      {
+        "traj_id": "7c2b4a97",
+        "success": true,
+        "n_obs_tokens": 106,
+        "obs_nll": 3.046875
+      },
+      {
+        "traj_id": "afb0426a",
+        "success": true,
+        "n_obs_tokens": 133,
+        "obs_nll": 1.515625
+      },
+      {
+        "traj_id": "71695c48",
+        "success": true,
+        "n_obs_tokens": 230,
+        "obs_nll": 2.21875
+      },
+      {
+        "traj_id": "c981a65e",
+        "success": true,
+        "n_obs_tokens": 273,
+        "obs_nll": 2.15625
+      },
+      {
+        "traj_id": "7aa7ea25",
+        "success": true,
+        "n_obs_tokens": 171,
+        "obs_nll": 1.7421875
+      },
+      {
+        "traj_id": "ed2c67d0",
+        "success": false,
+        "n_obs_tokens": 86,
+        "obs_nll": 2.734375
+      },
+      {
+        "traj_id": "afef7ed5",
+        "success": false,
+        "n_obs_tokens": 164,
+        "obs_nll": 2.328125
+      },
+      {
+        "traj_id": "eb8505b0",
+        "success": false,
+        "n_obs_tokens": 235,
+        "obs_nll": 1.9765625
+      },
+      {
+        "traj_id": "00bd2475",
+        "success": false,
+        "n_obs_tokens": 72,
+        "obs_nll": 1.65625
+      },
+      {
+        "traj_id": "58600903",
+        "success": false,
+        "n_obs_tokens": 175,
+        "obs_nll": 2.0
+      },
+      {
+        "traj_id": "58cef196",
+        "success": false,
+        "n_obs_tokens": 168,
+        "obs_nll": 2.140625
+      },
+      {
+        "traj_id": "ea92d204",
+        "success": false,
+        "n_obs_tokens": 234,
+        "obs_nll": 2.015625
+      },
+      {
+        "traj_id": "10d3577d",
+        "success": false,
+        "n_obs_tokens": 131,
+        "obs_nll": 2.640625
+      },
+      {
+        "traj_id": "2a2c2be8",
+        "success": false,
+        "n_obs_tokens": 126,
+        "obs_nll": 2.234375
+      },
+      {
+        "traj_id": "f5698165",
+        "success": false,
+        "n_obs_tokens": 230,
+        "obs_nll": 2.015625
+      }
+    ],
+    "checkpoint": "base (step 0)"
+  },
+  {
+    "mean_nll": 1.605078125,
+    "std_nll": 0.33300386040543417,
+    "n_trajs": 20,
+    "success_nll": 1.57109375,
+    "failure_nll": 1.6390625,
+    "per_traj": [
+      {
+        "traj_id": "6d1c9276",
+        "success": true,
+        "n_obs_tokens": 488,
+        "obs_nll": 1.078125
+      },
+      {
+        "traj_id": "c4d79554",
+        "success": true,
+        "n_obs_tokens": 81,
+        "obs_nll": 1.3984375
+      },
+      {
+        "traj_id": "53a4b7f0",
+        "success": true,
+        "n_obs_tokens": 222,
+        "obs_nll": 1.8125
+      },
+      {
+        "traj_id": "257aaf18",
+        "success": true,
+        "n_obs_tokens": 257,
+        "obs_nll": 1.828125
+      },
+      {
+        "traj_id": "707ed01d",
+        "success": true,
+        "n_obs_tokens": 293,
+        "obs_nll": 1.140625
+      },
+      {
+        "traj_id": "7c2b4a97",
+        "success": true,
+        "n_obs_tokens": 106,
+        "obs_nll": 2.296875
+      },
+      {
+        "traj_id": "afb0426a",
+        "success": true,
+        "n_obs_tokens": 133,
+        "obs_nll": 1.15625
+      },
+      {
+        "traj_id": "71695c48",
+        "success": true,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.8125
+      },
+      {
+        "traj_id": "c981a65e",
+        "success": true,
+        "n_obs_tokens": 273,
+        "obs_nll": 1.84375
+      },
+      {
+        "traj_id": "7aa7ea25",
+        "success": true,
+        "n_obs_tokens": 171,
+        "obs_nll": 1.34375
+      },
+      {
+        "traj_id": "ed2c67d0",
+        "success": false,
+        "n_obs_tokens": 86,
+        "obs_nll": 1.9921875
+      },
+      {
+        "traj_id": "afef7ed5",
+        "success": false,
+        "n_obs_tokens": 164,
+        "obs_nll": 1.8359375
+      },
+      {
+        "traj_id": "eb8505b0",
+        "success": false,
+        "n_obs_tokens": 235,
+        "obs_nll": 1.6328125
+      },
+      {
+        "traj_id": "00bd2475",
+        "success": false,
+        "n_obs_tokens": 72,
+        "obs_nll": 1.0234375
+      },
+      {
+        "traj_id": "58600903",
+        "success": false,
+        "n_obs_tokens": 175,
+        "obs_nll": 1.515625
+      },
+      {
+        "traj_id": "58cef196",
+        "success": false,
+        "n_obs_tokens": 168,
+        "obs_nll": 1.6171875
+      },
+      {
+        "traj_id": "ea92d204",
+        "success": false,
+        "n_obs_tokens": 234,
+        "obs_nll": 1.6484375
+      },
+      {
+        "traj_id": "10d3577d",
+        "success": false,
+        "n_obs_tokens": 131,
+        "obs_nll": 2.015625
+      },
+      {
+        "traj_id": "2a2c2be8",
+        "success": false,
+        "n_obs_tokens": 126,
+        "obs_nll": 1.640625
+      },
+      {
+        "traj_id": "f5698165",
+        "success": false,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.46875
+      }
+    ],
+    "checkpoint": "step 50"
+  },
+  {
+    "mean_nll": 1.621484375,
+    "std_nll": 0.3282317069796836,
+    "n_trajs": 20,
+    "success_nll": 1.59453125,
+    "failure_nll": 1.6484375,
+    "per_traj": [
+      {
+        "traj_id": "6d1c9276",
+        "success": true,
+        "n_obs_tokens": 488,
+        "obs_nll": 1.1171875
+      },
+      {
+        "traj_id": "c4d79554",
+        "success": true,
+        "n_obs_tokens": 81,
+        "obs_nll": 1.390625
+      },
+      {
+        "traj_id": "53a4b7f0",
+        "success": true,
+        "n_obs_tokens": 222,
+        "obs_nll": 1.84375
+      },
+      {
+        "traj_id": "257aaf18",
+        "success": true,
+        "n_obs_tokens": 257,
+        "obs_nll": 1.8671875
+      },
+      {
+        "traj_id": "707ed01d",
+        "success": true,
+        "n_obs_tokens": 293,
+        "obs_nll": 1.1953125
+      },
+      {
+        "traj_id": "7c2b4a97",
+        "success": true,
+        "n_obs_tokens": 106,
+        "obs_nll": 2.3125
+      },
+      {
+        "traj_id": "afb0426a",
+        "success": true,
+        "n_obs_tokens": 133,
+        "obs_nll": 1.1796875
+      },
+      {
+        "traj_id": "71695c48",
+        "success": true,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.828125
+      },
+      {
+        "traj_id": "c981a65e",
+        "success": true,
+        "n_obs_tokens": 273,
+        "obs_nll": 1.890625
+      },
+      {
+        "traj_id": "7aa7ea25",
+        "success": true,
+        "n_obs_tokens": 171,
+        "obs_nll": 1.3203125
+      },
+      {
+        "traj_id": "ed2c67d0",
+        "success": false,
+        "n_obs_tokens": 86,
+        "obs_nll": 1.984375
+      },
+      {
+        "traj_id": "afef7ed5",
+        "success": false,
+        "n_obs_tokens": 164,
+        "obs_nll": 1.7734375
+      },
+      {
+        "traj_id": "eb8505b0",
+        "success": false,
+        "n_obs_tokens": 235,
+        "obs_nll": 1.65625
+      },
+      {
+        "traj_id": "00bd2475",
+        "success": false,
+        "n_obs_tokens": 72,
+        "obs_nll": 1.0625
+      },
+      {
+        "traj_id": "58600903",
+        "success": false,
+        "n_obs_tokens": 175,
+        "obs_nll": 1.5859375
+      },
+      {
+        "traj_id": "58cef196",
+        "success": false,
+        "n_obs_tokens": 168,
+        "obs_nll": 1.59375
+      },
+      {
+        "traj_id": "ea92d204",
+        "success": false,
+        "n_obs_tokens": 234,
+        "obs_nll": 1.65625
+      },
+      {
+        "traj_id": "10d3577d",
+        "success": false,
+        "n_obs_tokens": 131,
+        "obs_nll": 2.046875
+      },
+      {
+        "traj_id": "2a2c2be8",
+        "success": false,
+        "n_obs_tokens": 126,
+        "obs_nll": 1.65625
+      },
+      {
+        "traj_id": "f5698165",
+        "success": false,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.46875
+      }
+    ],
+    "checkpoint": "step 75"
+  },
+  {
+    "mean_nll": 1.550390625,
+    "std_nll": 0.3073647898079282,
+    "n_trajs": 20,
+    "success_nll": 1.54296875,
+    "failure_nll": 1.5578125,
+    "per_traj": [
+      {
+        "traj_id": "6d1c9276",
+        "success": true,
+        "n_obs_tokens": 488,
+        "obs_nll": 1.0859375
+      },
+      {
+        "traj_id": "c4d79554",
+        "success": true,
+        "n_obs_tokens": 81,
+        "obs_nll": 1.296875
+      },
+      {
+        "traj_id": "53a4b7f0",
+        "success": true,
+        "n_obs_tokens": 222,
+        "obs_nll": 1.8359375
+      },
+      {
+        "traj_id": "257aaf18",
+        "success": true,
+        "n_obs_tokens": 257,
+        "obs_nll": 1.8125
+      },
+      {
+        "traj_id": "707ed01d",
+        "success": true,
+        "n_obs_tokens": 293,
+        "obs_nll": 1.203125
+      },
+      {
+        "traj_id": "7c2b4a97",
+        "success": true,
+        "n_obs_tokens": 106,
+        "obs_nll": 2.171875
+      },
+      {
+        "traj_id": "afb0426a",
+        "success": true,
+        "n_obs_tokens": 133,
+        "obs_nll": 1.109375
+      },
+      {
+        "traj_id": "71695c48",
+        "success": true,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.8046875
+      },
+      {
+        "traj_id": "c981a65e",
+        "success": true,
+        "n_obs_tokens": 273,
+        "obs_nll": 1.8515625
+      },
+      {
+        "traj_id": "7aa7ea25",
+        "success": true,
+        "n_obs_tokens": 171,
+        "obs_nll": 1.2578125
+      },
+      {
+        "traj_id": "ed2c67d0",
+        "success": false,
+        "n_obs_tokens": 86,
+        "obs_nll": 1.796875
+      },
+      {
+        "traj_id": "afef7ed5",
+        "success": false,
+        "n_obs_tokens": 164,
+        "obs_nll": 1.65625
+      },
+      {
+        "traj_id": "eb8505b0",
+        "success": false,
+        "n_obs_tokens": 235,
+        "obs_nll": 1.6171875
+      },
+      {
+        "traj_id": "00bd2475",
+        "success": false,
+        "n_obs_tokens": 72,
+        "obs_nll": 1.015625
+      },
+      {
+        "traj_id": "58600903",
+        "success": false,
+        "n_obs_tokens": 175,
+        "obs_nll": 1.4921875
+      },
+      {
+        "traj_id": "58cef196",
+        "success": false,
+        "n_obs_tokens": 168,
+        "obs_nll": 1.484375
+      },
+      {
+        "traj_id": "ea92d204",
+        "success": false,
+        "n_obs_tokens": 234,
+        "obs_nll": 1.6015625
+      },
+      {
+        "traj_id": "10d3577d",
+        "success": false,
+        "n_obs_tokens": 131,
+        "obs_nll": 1.921875
+      },
+      {
+        "traj_id": "2a2c2be8",
+        "success": false,
+        "n_obs_tokens": 126,
+        "obs_nll": 1.5078125
+      },
+      {
+        "traj_id": "f5698165",
+        "success": false,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.484375
+      }
+    ],
+    "checkpoint": "step 100"
+  },
+  {
+    "mean_nll": 1.5796875,
+    "std_nll": 0.3124765616210278,
+    "n_trajs": 20,
+    "success_nll": 1.5765625,
+    "failure_nll": 1.5828125,
+    "per_traj": [
+      {
+        "traj_id": "6d1c9276",
+        "success": true,
+        "n_obs_tokens": 488,
+        "obs_nll": 1.09375
+      },
+      {
+        "traj_id": "c4d79554",
+        "success": true,
+        "n_obs_tokens": 81,
+        "obs_nll": 1.328125
+      },
+      {
+        "traj_id": "53a4b7f0",
+        "success": true,
+        "n_obs_tokens": 222,
+        "obs_nll": 1.859375
+      },
+      {
+        "traj_id": "257aaf18",
+        "success": true,
+        "n_obs_tokens": 257,
+        "obs_nll": 1.8515625
+      },
+      {
+        "traj_id": "707ed01d",
+        "success": true,
+        "n_obs_tokens": 293,
+        "obs_nll": 1.21875
+      },
+      {
+        "traj_id": "7c2b4a97",
+        "success": true,
+        "n_obs_tokens": 106,
+        "obs_nll": 2.234375
+      },
+      {
+        "traj_id": "afb0426a",
+        "success": true,
+        "n_obs_tokens": 133,
+        "obs_nll": 1.15625
+      },
+      {
+        "traj_id": "71695c48",
+        "success": true,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.84375
+      },
+      {
+        "traj_id": "c981a65e",
+        "success": true,
+        "n_obs_tokens": 273,
+        "obs_nll": 1.8828125
+      },
+      {
+        "traj_id": "7aa7ea25",
+        "success": true,
+        "n_obs_tokens": 171,
+        "obs_nll": 1.296875
+      },
+      {
+        "traj_id": "ed2c67d0",
+        "success": false,
+        "n_obs_tokens": 86,
+        "obs_nll": 1.859375
+      },
+      {
+        "traj_id": "afef7ed5",
+        "success": false,
+        "n_obs_tokens": 164,
+        "obs_nll": 1.640625
+      },
+      {
+        "traj_id": "eb8505b0",
+        "success": false,
+        "n_obs_tokens": 235,
+        "obs_nll": 1.6171875
+      },
+      {
+        "traj_id": "00bd2475",
+        "success": false,
+        "n_obs_tokens": 72,
+        "obs_nll": 1.0546875
+      },
+      {
+        "traj_id": "58600903",
+        "success": false,
+        "n_obs_tokens": 175,
+        "obs_nll": 1.5078125
+      },
+      {
+        "traj_id": "58cef196",
+        "success": false,
+        "n_obs_tokens": 168,
+        "obs_nll": 1.5
+      },
+      {
+        "traj_id": "ea92d204",
+        "success": false,
+        "n_obs_tokens": 234,
+        "obs_nll": 1.6484375
+      },
+      {
+        "traj_id": "10d3577d",
+        "success": false,
+        "n_obs_tokens": 131,
+        "obs_nll": 1.953125
+      },
+      {
+        "traj_id": "2a2c2be8",
+        "success": false,
+        "n_obs_tokens": 126,
+        "obs_nll": 1.5390625
+      },
+      {
+        "traj_id": "f5698165",
+        "success": false,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.5078125
+      }
+    ],
+    "checkpoint": "step 125"
+  },
+  {
+    "mean_nll": 1.60078125,
+    "std_nll": 0.2893569024443472,
+    "n_trajs": 20,
+    "success_nll": 1.59375,
+    "failure_nll": 1.6078125,
+    "per_traj": [
+      {
+        "traj_id": "6d1c9276",
+        "success": true,
+        "n_obs_tokens": 488,
+        "obs_nll": 1.046875
+      },
+      {
+        "traj_id": "c4d79554",
+        "success": true,
+        "n_obs_tokens": 81,
+        "obs_nll": 1.5
+      },
+      {
+        "traj_id": "53a4b7f0",
+        "success": true,
+        "n_obs_tokens": 222,
+        "obs_nll": 1.796875
+      },
+      {
+        "traj_id": "257aaf18",
+        "success": true,
+        "n_obs_tokens": 257,
+        "obs_nll": 1.84375
+      },
+      {
+        "traj_id": "707ed01d",
+        "success": true,
+        "n_obs_tokens": 293,
+        "obs_nll": 1.2265625
+      },
+      {
+        "traj_id": "7c2b4a97",
+        "success": true,
+        "n_obs_tokens": 106,
+        "obs_nll": 2.25
+      },
+      {
+        "traj_id": "afb0426a",
+        "success": true,
+        "n_obs_tokens": 133,
+        "obs_nll": 1.2265625
+      },
+      {
+        "traj_id": "71695c48",
+        "success": true,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.828125
+      },
+      {
+        "traj_id": "c981a65e",
+        "success": true,
+        "n_obs_tokens": 273,
+        "obs_nll": 1.8671875
+      },
+      {
+        "traj_id": "7aa7ea25",
+        "success": true,
+        "n_obs_tokens": 171,
+        "obs_nll": 1.3515625
+      },
+      {
+        "traj_id": "ed2c67d0",
+        "success": false,
+        "n_obs_tokens": 86,
+        "obs_nll": 1.90625
+      },
+      {
+        "traj_id": "afef7ed5",
+        "success": false,
+        "n_obs_tokens": 164,
+        "obs_nll": 1.6171875
+      },
+      {
+        "traj_id": "eb8505b0",
+        "success": false,
+        "n_obs_tokens": 235,
+        "obs_nll": 1.6015625
+      },
+      {
+        "traj_id": "00bd2475",
+        "success": false,
+        "n_obs_tokens": 72,
+        "obs_nll": 1.1953125
+      },
+      {
+        "traj_id": "58600903",
+        "success": false,
+        "n_obs_tokens": 175,
+        "obs_nll": 1.546875
+      },
+      {
+        "traj_id": "58cef196",
+        "success": false,
+        "n_obs_tokens": 168,
+        "obs_nll": 1.546875
+      },
+      {
+        "traj_id": "ea92d204",
+        "success": false,
+        "n_obs_tokens": 234,
+        "obs_nll": 1.640625
+      },
+      {
+        "traj_id": "10d3577d",
+        "success": false,
+        "n_obs_tokens": 131,
+        "obs_nll": 1.9140625
+      },
+      {
+        "traj_id": "2a2c2be8",
+        "success": false,
+        "n_obs_tokens": 126,
+        "obs_nll": 1.609375
+      },
+      {
+        "traj_id": "f5698165",
+        "success": false,
+        "n_obs_tokens": 230,
+        "obs_nll": 1.5
+      }
+    ],
+    "checkpoint": "step 150"
+  }
+]

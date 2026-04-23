@@ -1,0 +1,1236 @@
+# OCAR Experiment Log
+
+> ALFWorld + Webshop, Qwen2.5-7B-Instruct, 4×A100 80GB
+> 框架: verl-agent (GiGPO fork)
+
+---
+
+## 0. 研究定位与方法边界（2026-04-19 强制澄清）
+
+> 此节是全文其他分析的前提，先读。
+
+### 0.1 问题动机
+
+**主 claim**：LLM agent 训练不应照搬 chatbot 范式。chatbot 只在 action tokens 上算 loss，把 environment observation tokens 作为 context mask 掉。本工作提出**将 observation tokens 纳入 agent RL 的学习目标**——以 observation NLL 作 auxiliary loss。
+
+这在 LLM agent RL 文献里（GiGPO / RAGEN / WebAgent / Digi-RL / ...）**首次系统做**，不是沿用 ICM/RND 的 intrinsic-reward 类比：
+- ICM/RND 用**独立学习的 forward model** 的 prediction error
+- 常规 RLHF/RL-agent **只在 action tokens 上 loss**
+- 本工作：**在 LM head 本身对 obs tokens 的 NLL 上加监督信号**
+
+### 0.2 实验身份对表（防止再混淆）
+
+| run / label | algorithmic status | 是否 = 方法实验 |
+|---|---|:-:|
+| **grpo+observe**（ALFWorld `lmlyvpa6` / Webshop `42rxhh6f`） | **纯 GRPO + 仪表盘**（仅观测 obs NLL 指标，不参与梯度） | ❌ 这是 baseline |
+| **dual-token** (`paper_v6` / `ws-wm-0416` 系列) | GRPO + obs NLL auxiliary loss | ✅ 唯一真正的 method |
+| **OCAR v1/v2/v3** (§4, §5) | 早期把 surprise 当 credit weight 的尝试 | ⚠️ 已证不稳健，不作 paper 主推 |
+
+**推论**：  
+- §11.1 里 observe step120 @ t=0.4 6-seed 均值 79.0% 是 **GRPO baseline 数字**；dual step150 80.7% 才是**方法数字**。两者差 +1.7 pp (Welch t≈0.6, p≈0.55) 目前**未显著**。
+- Webshop grpo+observe 跑到 SR 0.61 是 **GRPO baseline 在 webshop 的数字**；**dual-token 在 webshop 尚未跑**。
+
+### 0.3 当前方法证据的真实强度
+
+| 证据 | 对 method（dual-token）判决 |
+|---|---|
+| ALFWorld dual-token 6-seed +1.7 pp, p=0.55 | **弱利好**，未显著 |
+| ALFWorld dual-token val peak 86.7 %（单 run） | **利好**，但非 held-out test |
+| §9 obs-NLL traj 级 AUC 0.82 | **间接利好**（说明 obs 信号对 outcome 非零） |
+| §9 raw $s_\theta$ step 级 AUC ≈ 0.5 | **中性**（说明不能做 step-level credit，但 dual-token 是 aux loss 不是 credit）|
+| Webshop dual-token | **未跑** |
+
+**当前 method 级别的确定性严格受限于：dual-token 能否在充分 seed 下显著超过 GRPO。** 这是整篇 paper 的存亡条件。
+
+### 0.4 术语
+
+- **observation tokens**：环境返回的文本（alfworld 的 "On the countertop you see..." / webshop 的商品页）
+- **obs NLL / $s_\theta$**：policy 在 obs tokens 上的平均 negative log-likelihood
+- **surprise**：本工作用 $s_\theta$ / $\Delta S = s_\theta - s_\text{ref}$ 笼统指代；不是 ICM/RND 意义上的探索 bonus
+- **dual-token**：同一 step 上，action tokens 走 RL loss，obs tokens 走 NLL auxiliary loss
+
+### 0.5 对本日志读法的提醒
+
+- §2–§8 是**仪表盘分析**，不是 method 验证——只能读作"GRPO 训练中 obs NLL 的性质"
+- §9 / C 是**第一性原理 + negative finding**——说明 obs NLL 不能简单当 credit，但不否定 dual-token
+- §10 是 reward 设计讨论，**与 dual-token 正交**
+- §11 是 eval 数字与基线对齐
+- §12 是 webshop 跨域验证，**目前只有 GRPO baseline**，dual-token 结果待补
+
+---
+
+## 1. 实验总览
+
+> **⚠️ 方法身份（见 §0.2）**：本日志中 §2–§8 基于 OCAR v1 `delta_s` reward-weighting 的早期探索——此路线在 §4 崩溃诊断后**已放弃**，并非 paper 方法。当前 paper 主推 **dual-token**（GRPO + obs-token NLL auxiliary loss），其评估在 §11.1 Phase B。§2–§8 保留作为"为什么不把 surprise 当 reward"的反面证据，不是方法 section 来源。
+
+### 1.1 早期放弃路线：surprise-as-reward（OCAR v1/v2/v3）
+
+| 实验 | 日期 | 配置 | 最佳 Val SR | 最终状态 |
+|------|------|------|:---------:|---------|
+| v1 (delta_s, tau=1.0) | 2026-04-07→10 | `use_delta_s=true, tau=1.0` | 93.0% (step 120) | 崩溃 (step 125+) |
+| v2 (delta_s, tau=1.0, +clamp) | 2026-04-14 | 同上 + weight clamp [0.1, 10.0] | — (仅跑2步) | 手动停止 |
+| v3 (raw s_theta, tau=1.0) | 2026-04-14 | `use_delta_s=false, tau=1.0` | — | 未启动（已放弃该路线） |
+
+**结论**：反面证据已充分（§4, §9.3），不再继续此路线。
+
+### 1.2 当前评估主线（t=0.4, 6 seeds, 详见 §11.1）
+
+| 方法 | 身份 | step | Val SR (mean ± std) |
+|---|---|:-:|:-:|
+| observe | GRPO + 仪表盘（baseline） | 120 | 0.790 ± 0.048 |
+| **dual-token** | **paper 方法** | 150 | **0.807 ± 0.044** |
+| GiGPO（paper 主方法对标） | — | — | 0.908 (paper) |
+
+**当前方法状态**：dual-token 在 n=6 seeds 下比 observe baseline +1.7pp，但 Welch t 不显著 (p ≈ 0.55)；4 额外 seeds 正在后台跑（pid=3732646）。若 n=10 仍不显著，paper 需把方法贡献**降格为"obs-grounded auxiliary LM 目标的初步证据"**，而非"显著提升"。
+
+---
+
+## 2. Surprise 信号全生命周期分析
+
+### 2.1 信号演变：ΔS 不是"无效"，而是"冷启动慢"
+
+之前基于 v2 前两步的数据得出"ΔS 信号无效"的结论**过于武断**。通过对 5 个 v1 checkpoint（step 50/75/100/125/150）做 forward pass 推理，得到完整的信号演变曲线：
+
+| 训练阶段 | ΔS within-traj std | Raw S_θ within-traj std | Raw/ΔS 比 | ΔS weight std | Raw weight std |
+|:--------:|:------------------:|:----------------------:|:---------:|:-------------:|:--------------:|
+| v2 step 1 | **0.005** | 0.144 | 28x | 0.005 | 0.146 |
+| v2 step 2 | 0.009 | 0.136 | 15x | — | — |
+| step 50 | **0.493** | 1.508 | **3.1x** | 0.316 | 0.994 |
+| step 75 | 0.503 | 1.498 | 3.0x | 0.322 | 0.989 |
+| step 100 | **0.635** | 1.320 | **2.1x** | 0.398 | 0.887 |
+| step 125 | 0.660 | 1.301 | 2.0x | 0.412 | 0.876 |
+| step 150 | 0.655 | 1.283 | 2.0x | 0.409 | 0.865 |
+
+**关键发现：**
+
+1. **ΔS 增长极快**：从 step 1 的 0.005 到 step 50 的 0.493（**100 倍增长**）。到 step 50，ΔS weight range=[0.54, 1.49]——已经是有意义的信用分配。
+
+2. **两者趋势相反**：ΔS std 持续增长（0.005→0.655），Raw S_θ std 持续缩小（1.508→1.283）。ΔS 越训越有效，Raw S_θ 越训越弱。
+
+3. **Raw S_θ 优势主要在初期**：前几步 Raw 是 ΔS 的 15-28 倍；到 step 100 后只有 2 倍。
+
+### 2.2 更正后的对比结论
+
+| 维度 | ΔS | Raw S_θ |
+|------|:--:|:-------:|
+| 训练初期（前几步） | ❌ 极弱 (std≈0.005) | ✅ 有效 (std≈0.144) |
+| 训练中期（step 50+） | ✅ 有效 (std≈0.5+) | ✅ 更强但含噪声 |
+| 训练后期趋势 | 📈 持续增强（**崩溃风险**） | 📉 逐渐减弱 |
+| 去噪效果 | ✅ 减去 base rate surprise | ❌ 含长度偏差等噪声 |
+| 崩溃风险 | ⚠️ **高**（信号无上界增长） | ⚠️ 中（信号自然衰减） |
+
+**核心矛盾：ΔS 和 Raw S_θ 各有致命弱点。** ΔS 冷启动太慢但后期太强，Raw S_θ 初期有效但后期区分度衰减。两者都不是理想的信用分配信号——需要归一化。
+
+---
+
+## 3. Surprise 信号深度特性分析
+
+### 3.1 Per-Task-Type 信号质量
+
+（数据来源：v2 step 1, 128 条轨迹）
+
+| 任务类型 | n | SR | S_θ within-traj std | ΔS within-traj std | S_θ mean |
+|---------|:-:|:--:|:-------------------:|:------------------:|:--------:|
+| look_at_obj | 24 | 41.7% | **0.150** | 0.0049 | 0.608 |
+| pick_and_place | 32 | 18.8% | **0.145** | 0.0054 | 0.619 |
+| pick_clean | 24 | 12.5% | **0.148** | 0.0049 | 0.582 |
+| pick_cool | 24 | 8.3% | 0.142 | 0.0060 | 0.612 |
+| pick_two | 24 | 0.0% | 0.135 | 0.0045 | 0.590 |
+| pick_heat | 0 | — | — | — | — |
+
+**发现：训练初期各任务类型的 S_θ within-traj std 高度相似（0.135-0.150）。**
+
+这意味着：
+- **Clean 表现差 (-15.1pp vs GRPO) 不是因为 surprise 信号弱**——所有任务的信号强度几乎相同
+- Clean 表现差的更可能原因：OCAR 的信用分配**方向**在 clean 任务上不正确（surprise 高的步骤不是真正重要的步骤）
+
+### 3.2 Clean vs Heat：为什么 Surprise 方向可能在 Clean 上错误？
+
+OCAR 的假设：
+- 成功轨迹中，**低 surprise**步 = "模型预期到的正确操作" → 应获更多 credit
+- 失败轨迹中，**高 surprise**步 = "出乎模型预料的错误转折" → 应承担更多 blame
+
+**Heat 任务（表现好）：** 微波炉交互是高度特征化的——"You heat the [object]" 这个 observation 在预训练中罕见，产生高 surprise。成功轨迹中，到达微波炉前的导航步 surprise 低（模型预期），使用微波炉时 surprise 高（新奇操作）。OCAR 正确地给导航+拾取步更多 credit（这些是成功的基础）。
+
+**Clean 任务（表现差）：** 水龙头/清洗交互的文本模式非常普通——"You clean the [object]" 与日常语料重叠度高，surprise 不特别高。更关键的是：clean 任务中最重要的步骤（找到正确的 sinkbasin）可能**恰好**产生高 surprise（因为 sinkbasin 位置不可预测），此时 OCAR 对成功轨迹反而**惩罚**了这个关键步骤（给低 credit），导致学习错误。
+
+**根本问题：Surprise 衡量的是"预测质量"，不是"动作质量"。** 两者的相关性取决于具体任务——在 heat 上碰巧正相关（好的动作产生可预测的结果），在 clean 上可能负相关或无关。
+
+### 3.3 Success vs Failure 信号区分度
+
+| 维度 | Success | Failure | Ratio |
+|------|:-------:|:-------:|:-----:|
+| S_θ within-traj std | 0.146 | 0.144 | **0.99x** |
+| ΔS within-traj std | 0.005 | 0.005 | 1.08x |
+
+**两类轨迹的 surprise 分布几乎完全相同。** 这意味着 surprise 不能区分"好轨迹内部的信号模式"和"差轨迹内部的信号模式"——OCAR 只是翻转 softmax 方向（成功用 -surprise，失败用 +surprise），但如果分布形状相同，这个翻转可能没有意义。
+
+### 3.4 信号增长与崩溃风险
+
+通过对数回归拟合 ΔS within-traj std 增长趋势：**ΔS_std ≈ 0.178 × ln(step) - 0.216**
+
+| 推算步数 | ΔS within-traj std | 模拟 w_max (10步轨迹) | 模拟 w_min |
+|:-------:|:------------------:|:--------------------:|:---------:|
+| step 50 | 0.493 | 1.65 | 0.54 |
+| step 100 | 0.635 | 1.86 | 0.45 |
+| step 150 | 0.655 | 1.89 | 0.43 |
+| step 200 | 0.725 | 2.00 | 0.45 |
+| step 300 | 0.797 | 2.11 | 0.41 |
+| step 500 | 0.887 | 2.25 | 0.37 |
+
+v1 崩溃并非因为 mean w_max 过大（2.0 不极端），而是因为**尾部事件**：个别轨迹中某步的 ΔS 极端值触发了 softmax 饱和（95+ 百分位 ΔS → w_max >> 10），进而导致 advantage 极端化。
+
+---
+
+## 4. V1 崩溃诊断
+
+### 4.1 崩溃时间线
+
+v1 配置: delta_s=true, tau=1.0, **无 weight clamp**
+
+| Step | KL Loss | Response Length | Train SR | Val SR | Adv Min | 阶段 |
+|:----:|:-------:|:--------------:|:--------:|:------:|:-------:|------|
+| 85 | 0.60 | 115 | 78.9% | 78.9% | -9.8 | 正常 |
+| 100 | 0.61 | 103 | 85.9% | 81.2% | -17.6 | 正常 |
+| **110** | **1.01** | 94 | 77.3% | **90.6%** | **-50.7** | ⚠️ 首次极端 |
+| **118** | **1.40** | **84** | 68.8% | — | **-112.8** | 🔴 触发点 |
+| **119** | **1.99** | **82** | **53.1%** | — | -59.8 | 🔴 KL 爆炸 |
+| **120** | 0.79 | **79** | 68.8% | **93.0%** | -61.6 | 峰值/崩溃 |
+| 125+ | >3.0 | <50 | <30% | 0% | >-300 | 💀 崩溃 |
+
+### 4.2 崩溃根因（更新版）
+
+之前归因为"ΔS 信号突然增大"。修正后的理解：
+
+1. **ΔS 信号以对数速度持续增长，这本身是正常的**（θ 与 ref 逐步分化）
+2. **问题在于增长没有被归一化**——raw softmax 直接作用于越来越大的输入值
+3. **尾部事件触发崩溃**——不需要 mean ΔS 很大，只需要某条轨迹中某步的 ΔS 极端值（outlier），就能通过 softmax 产生 w > 50 的极端权重
+4. **正反馈循环**——极端 weight → 极端 gradient → θ 加速偏离 ref → ΔS 更大 → 更极端的 weight
+
+**这不是 ΔS 特有的问题——Raw S_θ 同样会崩溃**，只是时间不同（Raw S_θ 初期更强，可能崩溃更早）。
+
+### 4.3 V2 Clamp 修复的局限
+
+Weight clamp [0.1, 10.0] 是必要的安全网，但不够优雅：
+- 对初期 ΔS（weight ~1.0）：clamp 无作用（不触发）
+- 对后期 ΔS（weight 可能 >10）：clamp 硬截断，丢失信号梯度信息
+- 不能自适应——同样的 clamp 范围在不同训练阶段有不同含义
+
+---
+
+## 5. 方法改进提案：OCAR v3（Z-score 归一化）
+
+### 5.1 核心问题
+
+当前 OCAR 的 softmax 输入是 raw signal / tau：
+```
+w_t = T × softmax(±signal_t / tau)
+```
+
+信号随训练持续变化（ΔS 增长，Raw S_θ 衰减），但 tau 是固定的。导致：
+- 初期：信号/tau 太小 → weights ≈ uniform（浪费）
+- 后期：信号/tau 太大 → weights 极端化（崩溃）
+- 不同任务：信号方差不同 → 某些任务被过度/不足加权
+
+### 5.2 解决方案：Z-score 归一化
+
+在每条轨迹内对 surprise 信号做 z-score 标准化，使 softmax 输入始终处于可控范围：
+
+```python
+# 每条轨迹内标准化
+signal_mean = mean(signal_t for t in trajectory)
+signal_std  = max(std(signal_t for t in trajectory), ε)  # ε 防止零除
+z_t = (signal_t - signal_mean) / signal_std
+
+# 然后 softmax
+w_t = T × softmax(±z_t / tau)
+```
+
+### 5.3 为什么 Z-score 解决所有已知问题
+
+参数：tau=1.0, ε=0.1
+
+**Z-score 使 weight 分布与信号幅度完全无关：**
+
+| 原始信号 std | Z-score 后 std | w_max | w_min | w_std |
+|:----------:|:-------------:|:-----:|:-----:|:-----:|
+| 0.009 (v2 step 1 ΔS) | 0.062 | 1.11 | 0.92 | 0.062 |
+| 0.050 | 0.343 | 1.66 | 0.60 | 0.359 |
+| 0.100 | 0.686 | 2.43 | 0.31 | 0.729 |
+| **≥0.300** | **1.000** | **3.14** | **0.16** | **1.043** |
+
+当原始信号 std ≥ ε（训练中期以后），z-score 后 std=1.0（标准正态），weight 分布完全稳定在 [0.16, 3.14]——**既不会初期无效，也不会后期爆炸。**
+
+### 5.4 逐一解决已知问题
+
+| 问题 | 当前方法 | Z-score 方法 |
+|------|---------|-------------|
+| ΔS 冷启动（std=0.005） | weight ≈ uniform | z-score 放大相对差异 → **有效** |
+| ΔS 后期爆炸（std=0.66） | 需要 clamp 硬截断 | z-score 自然压缩 → **稳定** |
+| Raw S_θ 后期衰减 | weight 区分度下降 | z-score 保持放大 → **持续有效** |
+| 任务异质性（clean vs heat） | 所有任务同一 tau | 每条轨迹独立归一化 → **自适应** |
+| Clamp 硬截断丢失梯度 | 是 | **不需要 clamp**（w_max ≤ 3.14） |
+
+### 5.5 关于 ε 的选择
+
+ε 是"最小有效信号 std"。当轨迹内 surprise 的真实 std < ε：
+- z-score 被压缩 → softmax → 接近 uniform weights → **OCAR 优雅退化为 GRPO**
+- 这正是我们期望的行为：当 surprise 没有区分度时，不做信用分配
+
+推荐 ε = 0.1：对应 S_θ std ≈ 0.1 时开始启用信用分配。从分析数据看，几乎所有轨迹的 S_θ within-traj std > 0.1（min=0.068），所以大部分轨迹都会被有效重加权。
+
+### 5.6 Z-score 下 ΔS vs Raw S_θ 的选择
+
+Z-score 消除了幅度差异后，两者的区别变为纯粹的**排序质量**：哪个信号更准确地把"真正重要的步骤"排到顶部？
+
+| 因素 | ΔS 排序 | Raw S_θ 排序 |
+|------|:------:|:----------:|
+| 捕获"模型学到了什么" | ✅ 去掉 ref 的 base rate，聚焦 θ 的学习增量 | ❌ 混合了固有难度和学习变化 |
+| 长度偏差 | ✅ 消除（ref 有同样偏差） | ⚠️ 长 obs 天然 NLL 更高 |
+| 初期排序可靠性 | ⚠️ 微小差异放大可能是噪声 | ✅ 绝对值差异更可靠 |
+| 后期排序可靠性 | ✅ 去噪后信号干净 | ⚠️ 信号衰减但仍有 base rate 贡献 |
+
+**推荐：z-norm(ΔS) 为默认，z-norm(Raw S_θ) 为备选。** 因为 z-norm 已经解决了 ΔS 的冷启动问题（放大微小差异），而 ΔS 的去噪优势在 z-norm 后得以保留。
+
+### 5.7 OCAR v3 代码改动
+
+```python
+# core_ocar.py 中 compute_ocar_outcome_advantage 的修改
+# 在 Step 3 (OCAR per-trajectory softmax weights) 中:
+
+for traj_id, indices in traj2indices.items():
+    indices = sorted(indices)
+    T = len(indices)
+    if T <= 1:
+        continue
+
+    traj_adv = episode_adv[indices[0]].item()
+    traj_s = np.array([surprise[i] for i in indices])
+
+    # ── v3 改动：Z-score 归一化 ──
+    s_std = max(np.std(traj_s), epsilon_znorm)  # epsilon_znorm = 0.1
+    traj_z = (traj_s - np.mean(traj_s)) / s_std
+
+    if traj_adv > 0:
+        w = T * _softmax(-traj_z, temperature=tau)  # tau=1.0
+    elif traj_adv < 0:
+        w = T * _softmax(traj_z, temperature=tau)
+    else:
+        continue
+
+    for j, idx in enumerate(indices):
+        ocar_weights[idx] = w[j]
+```
+
+改动量：**3 行**（加 z-score 计算，用 traj_z 替换 traj_s）。
+
+### 5.8 超参数简化
+
+| 参数 | v1/v2 | v3 (z-norm) | 说明 |
+|------|:-----:|:-----------:|------|
+| tau | 1.0（但对不同信号幅度含义不同） | 1.0（**固定不变**，因为输入已标准化） | 不再需要调 tau |
+| weight_clip_min | 0.1 | 0.1（安全网，预计不触发） | 可选移除 |
+| weight_clip_max | 10.0 | 10.0（安全网，预计不触发） | 可选移除 |
+| epsilon_znorm | — | **0.1（新增）** | 最小有效 std |
+| use_delta_s | 需要选择 | **true（推荐）** | z-norm 让 ΔS 冷启动不再是问题 |
+
+**净效果：减少 1 个需要 tune 的超参数**（不再需要 tau sweep），新增 1 个不敏感的参数（epsilon_znorm）。
+
+---
+
+## 6. World Model Dynamics 实验 (2026-04-14)
+
+### 6.1 实验设计
+
+**目的**: 验证 paper_v6 的 World Model Degradation 假说。
+
+**方法**: 方案 B（固定轨迹 forward pass）。20 条固定轨迹（10 success + 10 failure），对 base + 5 个 checkpoint 计算 obs token NLL。
+
+**评估脚本**: `ocar/eval_world_model_degradation.py`
+
+**Caveat**: Checkpoint 来自 OCAR 训练（delta_s），非纯 GRPO。但训练初期 OCAR weight std=0.005（≈GRPO）。
+
+### 6.2 结果
+
+| Checkpoint | Obs NLL | ± std | Success NLL | Failure NLL | Gap |
+|:----------:|:-------:|:-----:|:-----------:|:-----------:|:---:|
+| **base (step 0)** | **2.061** | 0.426 | 1.947 | 2.174 | 0.227 |
+| step 50 | 1.605 | 0.333 | 1.571 | 1.639 | 0.068 |
+| step 75 | 1.622 | 0.328 | 1.595 | 1.648 | 0.053 |
+| **step 100** | **1.550** | 0.307 | 1.543 | 1.558 | **0.015** |
+| step 125 | 1.580 | 0.313 | 1.577 | 1.583 | 0.006 |
+| step 150 | 1.601 | 0.289 | 1.594 | 1.608 | 0.014 |
+
+### 6.3 关键发现
+
+1. **单调退化假说不成立。** Obs NLL 从 2.061 降至 1.550（-24.8%）。
+2. **U 型曲线：**step 100 后局部退化（1.550→1.601, +3.3%），与崩溃同步。
+3. **Success/Failure NLL gap 消失**（0.227→0.015）——surprise 区分度随训练衰减。
+
+### 6.4 对 Paper v6 的影响
+
+叙事调整："RL 训练隐式改善 world model，但这是不受控的副产品。Dual-Token 将其显式化，并在 RL 不稳定时提供 gradient anchor。"
+
+---
+
+## 7. 综合思考：Surprise 信号是否适合信用分配？
+
+### 7.1 理论层面的问题
+
+OCAR 的核心假设：**步级 observation surprise 与该步动作的因果贡献相关。**
+
+具体而言：
+- 成功轨迹中，低 surprise 步 = "模型预期的正确操作" → 高 credit
+- 失败轨迹中，高 surprise 步 = "出乎预料的错误转折" → 高 blame
+
+**这个假设何时成立？**
+- ✅ 当好动作的结果可预测、坏动作的结果不可预测时
+- ❌ 当好动作本身就是创新的（高 surprise 但应该给 credit）
+- ❌ 当坏动作产生模板化的失败消息（低 surprise 但应该给 blame）
+
+### 7.2 数据层面的证据
+
+1. **Success/Failure 信号形状无差异**（within-traj std ratio = 0.99x）→ surprise 分布不区分好坏轨迹
+2. **Clean 任务表现恶化**（-15.1pp vs GRPO）→ surprise 方向在某些任务上可能错误
+3. **Heat 任务表现提升** → surprise 方向在特征化交互上正确
+4. **Success/Failure NLL gap 随训练消失** → surprise 的跨轨迹区分度不可持续
+
+### 7.3 Surprise 信号的适用范围
+
+| 维度 | 有利 | 不利 |
+|------|------|------|
+| 任务类型 | 有特征化环境交互（heat, examine） | 模板化交互（clean） |
+| 训练阶段 | 初中期（模型仍在学习环境） | 后期（模型已熟悉所有模式） |
+| 轨迹类型 | 带明确"转折点"的轨迹 | 均匀难度的轨迹 |
+
+### 7.4 结论
+
+**Surprise 做信用分配是一个合理但有局限的启发式。** 它不是因果信号，而是相关性代理。Z-score 归一化可以解决工程层面的问题（冷启动、崩溃、任务异质性），但不能解决概念层面的问题（surprise ≠ action quality）。
+
+**对论文叙事的影响**：
+- 不应承诺 surprise 是"通用的信用分配信号"
+- 应定位为"在特定条件下（特征化环境交互）比 uniform advantage 更好的启发式"
+- Dual-Token Training（paper_v6）的定位更稳健——直接训 world model，不依赖 surprise 与 action quality 的相关性假设
+
+---
+
+## 8. 待运行实验
+
+### 8.1 最高优先：OCAR v3 (z-norm ΔS)
+
+```bash
+# 代码改动：core_ocar.py 加 3 行 z-score 归一化
+# 新增参数：+algorithm.ocar.epsilon_znorm=0.1
+export PATH=/local_nvme/guanyiming/env/verl-agent-06x-py312/bin:$PATH
+OCAR_USE_DELTA_S=true OCAR_TAU=1.0 N_GPUS=4 \
+  nohup bash examples/ocar_trainer/run_alfworld.sh > ocar_v3_znorm_experiment.log 2>&1 &
+```
+
+**预期**:
+- Weight 分布从训练开始即稳定（w_std ≈ 0.7-1.0，w_max ≈ 3.1）
+- 不会崩溃（weight 自然上界 ~3.1，不触发 clamp）
+- tau=1.0 不再需要调优
+
+### 8.2 GRPO Baseline
+
+```bash
+bash examples/grpo_trainer/run_alfworld.sh
+```
+本地公平对比 + 纯 GRPO degradation 曲线。
+
+### 8.3 实验矩阵
+
+| # | 实验 | 优先级 | 目的 |
+|:-:|------|:-----:|------|
+| 1 | **OCAR v3 (z-norm ΔS, tau=1.0)** | **最高** | 验证 z-norm 解决冷启动+崩溃 |
+| 2 | GRPO baseline | 高 | 公平对比 + WM degradation 曲线 |
+| 3 | OCAR v3 (z-norm Raw S_θ) | 中 | 对比 z-norm 下 ΔS vs Raw 的排序质量 |
+| 4 | Dual-Token (L_WM on obs tokens) | 中 | 验证 world model supervision |
+| 5 | OCAR v3 + Dual-Token | 低 | 组合实验 |
+
+---
+
+## Appendix A: 关键文件路径
+
+| 文件 | 说明 |
+|------|------|
+| `ocar/core_ocar.py` | OCAR 核心算法（需改 3 行实现 v3） |
+| `ocar/eval_world_model_degradation.py` | WM degradation 评估脚本 |
+| `ocar/eval_delta_s_variance.py` | ΔS 信号随训练变化分析脚本 |
+| `ocar/deep_surprise_analysis.py` | 信号深度分析脚本 |
+| `ocar/wm_degradation_results.json` | WM 评估结果数据 |
+| `ocar/delta_s_variance_analysis.json` | ΔS 方差分析数据 |
+| `verl/trainer/ppo/ray_trainer.py` | 训练器集成 (v2 修改未提交) |
+| `examples/ocar_trainer/run_alfworld.sh` | 训练脚本 |
+| `checkpoints/merged_hf/step_{50,75,100,125,150}/` | 合并后的 HF 格式 checkpoint |
+| `paper_v6` | Dual-Token Training 方案文档 |
+
+## Appendix B: 分析脚本使用
+
+```bash
+# 环境
+export PATH=/local_nvme/guanyiming/env/verl-agent-06x-py312/bin:$PATH
+
+# Step 1: 合并 FSDP checkpoint → HF 格式（已完成）
+python3 ocar/eval_world_model_degradation.py merge
+
+# Step 2: World Model Degradation 评估
+python3 ocar/eval_world_model_degradation.py eval
+
+# Step 3: ΔS 信号方差随训练变化
+python3 ocar/eval_delta_s_variance.py
+
+# Step 4: Surprise 信号深度分析
+python3 ocar/deep_surprise_analysis.py
+```
+
+---
+
+## 4. Paper Idea 探索：Surprise 时间结构与 Stuck 检测（2026-04-17）
+
+### 4.1 原始假设（已修正）
+- **H1**：Obs-NLL surprise 信号可区分探索与非探索动作
+- **H2**：Isolated high surprise = 好探索，Consecutive high surprise = 坏探索
+- 数据源：`checkpoints/grpo_observe_alfworld_20260415_104816/grpo_observe_seed0/global_step_{20..120}`，共 768 trajectory / 23,936 steps
+
+### 4.2 信号独立性（8 种变体对比）
+
+每步可用字段：`s_theta_mean` (full-history obs NLL)、`s_ref_mean` (ref model NLL)、`delta_s_mean = s_theta - s_ref`、`wm_s` (P(obs|prev_obs,act))、`wm_s_B` (P(obs|act))、`consecutive_s`、`entropy_mean/max`。
+
+**Step-level 相关性与 success（traj 级标签）**：
+
+| 信号 | step corr w/ succ | traj-mean corr | traj-level AUC |
+|---|---|---|---|
+| s_theta | +0.01 | +0.09 | 0.55 |
+| s_ref | -0.09 | -0.08 | 0.53 |
+| **delta_s** | **+0.33** | **+0.45** | **0.77** |
+| wm_s | -0.09 | -0.43 | 0.75 |
+| wm_s_B | -0.12 | -0.52 | **0.81** |
+| ent_mean | -0.30 | -0.71 | 0.94 |
+| ent_max | -0.33 | -0.73 | 0.94 |
+
+- 原始 `s_theta` 几乎无预测力（AUC 0.55）
+- `delta_s` 与 `ent_mean` 方向相反（+0.33 vs -0.30），相关性仅 -0.12 → **确实独立信号**
+- `wm_s_B` 也独立但方向负（AUC 0.81）
+
+### 4.3 长度混淆：致命问题
+
+- `n_steps` 单独 AUC = **0.9993**（success 平均 15 步，fail 平均 50 步）
+- **同一长度桶 [40,60) 内**：ent_mean AUC 崩至 0.43（反向），delta_s 保持 0.59
+- **加 n_steps 做 partial-out**：所有信号残差 |r|<0.04 → 信号 ≈ 长度代理
+
+### 4.4 早期窗口实验（破除长度混淆）
+
+用前 N 步预测最终 success：
+
+| 信号 | 前 5 步 AUC | 前 10 步 | 前 15 步 |
+|---|---|---|---|
+| **delta_s_mean** | **0.73** | **0.74** | **0.69** |
+| s_theta_mean | 0.55 | 0.52 | 0.51 |
+| ent_mean | 0.16 (反向，强度 0.34) | 0.12 | 0.15 |
+| wm_s_B | 0.36 (反向) | 0.35 | 0.38 |
+
+**关键发现**：
+- `delta_s` 是**唯一在长度控制后仍有 AUC>0.7 的信号**
+- `ent_mean` 的反向强度（|AUC-0.5|=0.34）其实和 delta_s 相近 → 两者都是独立预测器，只是方向不同
+
+### 4.5 Step-level Stuck 检测（本地规则标签）
+
+**正确的问法**（避免 traj-outcome leakage）：
+
+Stuck label = 未来 3 步内 ≥2 次"Nothing happens" **或** 未来 4 步内同动作重复 ≥3 次
+Useful-exploration label = 未来 3 步内出现 ≥3 个新 obs token
+
+| 信号 | 预测 Stuck AUC | 预测 Useful AUC |
+|---|---|---|
+| s_theta | 0.58 | 0.47 |
+| **delta_s** | 0.48 | **0.58** |
+| ent_mean | 0.60 | 0.40 (反向 0.60) |
+| **ema_delta_s** (λ=0.5) | 0.48 | **0.59** |
+| **win3_delta_s** (3-step mean) | 0.48 | **0.59** |
+| sustained_pos_delta (count past3 > 0) | 0.49 | 0.55 |
+| d_delta_s (Δdelta over time) | 0.52 | 0.49 |
+
+- **ent_mean** 预测 stuck 最好（0.60），预测 useful 反向最好（0.40，反向强度 0.60）——即"高 action entropy 即将 stuck"
+- **delta_s 及其时间聚合（EMA、win3）** 预测 useful 最好（0.58-0.59）
+- **朴素 s_theta 对两个标签都弱** → 再次验证原始 obs NLL 不是好信号
+
+### 4.6 Isolated vs Consecutive（用 step-level 标签，非 traj outcome）
+
+τ = p85 of signal，区分 run-length=1（isolated）vs run-length≥2（consecutive）：
+
+| 信号 | iso stuck% | iso useful% | con stuck% | con useful% |
+|---|---|---|---|---|
+| s_theta (τ=2.28) | 12.7% | 32.0% | **17.1%** | 30.0% |
+| delta_s (τ=-0.18) | 7.7% | 36.2% | 8.4% | **45.8%** |
+| win3_delta_s | 9.4% | 52.2% | 8.7% | 45.9% |
+| ema_delta_s | **5.4%** | 49.4% | 8.8% | 46.1% |
+
+**结论**：
+- **s_theta** 的 consec 高点 stuck 率是 iso 的 1.35x，有一点时间结构效应但弱
+- **delta_s** 的 iso 和 consec 在 stuck 上几乎无差（7.7 vs 8.4），但 **useful% 在 consec 更高**（36 vs 46）→ delta_s 的连续高是"连续探索到新东西"
+- **原假设 H2（isolated=好、consec=坏）被推翻**：用 step-level 标签看，两种结构没有明显的好/坏分离
+- **新观察**：不同信号的时间结构语义不同——s_theta consec 偏"卡壳"，delta_s consec 偏"连续吸收新信息"
+
+### 4.7 Case 观察
+
+手动检查 5 个 delta_s isolated 和 5 个 consecutive run（len≥3）：
+- **Isolated**（fail traj）：`step22 examine mug 1` 看到新东西但后续没用上 → 不算 stuck 也不算 useful
+- **Consecutive**（success traj `cdbaf430`）：连续打开冰箱、microwave、cabinet 发现新物品 → 连续 useful
+- **Consecutive**（fail traj `f4c9dacf`）：在 countertop1/2 之间来回 → 不 stuck 但无效
+
+**定性上 consecutive 高 delta_s 更像"连续探索"而非"卡壳"**，与 H2 相反。
+
+### 4.8 当前结论与下一步
+
+**已推翻**：
+- H1 弱（s_theta AUC 0.55）
+- H2 推翻（step-level 标签下 iso/consec 未分离好坏）
+
+**幸存**：
+- `delta_s` 是唯一在长度控制下 AUC>0.7 的 obs 信号（前 5 步 0.73）
+- `ent_mean` 反向同样强（0.34），与 delta_s 独立 → 可能构成有用的 2D 象限
+- `delta_s` 的时间聚合（EMA/win3）略增强 useful-exploration 预测
+
+**对主 OCAR 项目的启示**：
+- 当前 OCAR v1 用 delta_s + tau=1.0 达到 93%（崩溃前），信号选择是对的
+- s_theta 变体（raw_s_theta v3）理论上会比 delta_s 差，可以作为对照实验验证
+- `wm_s_B`（AUC 0.81）此前未被 OCAR 利用，值得作为下一个信号变体尝试
+
+**Paper idea 状态**：
+- 原"isolated vs consecutive"两分法不能作为顶会核心 claim
+- "Length confound + delta_s 生还"可以作为 workshop / EMNLP Findings 级别的方法论贡献
+- 更强的 claim 需要跨环境（WebShop/ScienceWorld）+ 跨模型验证
+
+---
+
+## 9. Surprise 信号的第一性原理（2026-04-19，综合 §2–§8, §11 + 跨模型/跨 ckpt 证据）
+
+> 目的：**不引入新假设**，从定义出发把 obs-NLL surprise 信号完整刻画清楚。所有结论标注证据出处；原 §12 / §13 的大表已下移到 Appendix C 作为数据留档。
+
+### 9.1 定义
+
+$$s_\theta(o_t \mid c_{<t}, a_t) = -\frac{1}{|o_t|}\sum_k \log \pi_\theta(o_t^k \mid c_{<t}, a_t)$$
+
+**就是且仅是** policy 当前权重下 observation tokens 的平均 NLL。
+- 不是 value，不是 reward
+- 不是独立 transition model（没有独立 WM head）
+- 不是 action 评估
+
+后续所有性质都由"LM head 的条件 NLL"这一本质决定。
+
+### 9.2 方差分解：信号的三成分结构 ⭐ 核心结构
+
+对同一批轨迹、只变 scorer（模型或 ckpt），两套独立方差分解给出同向结果：
+
+| 数据 | between-step/traj | between-scorer | scorer × step 交互 | 证据 |
+|---|:-:|:-:|:-:|:-:|
+| 4 模型 × 93 step（cross-model, SS=1443.7） | **87.6 %** | 2.4 % | 10.0 % | C.1 Q2 |
+| 6 ckpt × 20 traj（cross-ckpt, SS=17.25） | **74.5 %** | 21.6 % | **3.9 %** | C.2 Q4 |
+
+因此 $s_\theta$ 可以分解为三个正交成分：
+
+$$s_\theta(o_t) = \underbrace{f_\text{text}(o_t)}_{\text{74–88 \%}} + \underbrace{g(\theta)}_{\text{2–22 \%}} + \underbrace{h(\theta, o_t)}_{\text{4–10 \%}}$$
+
+- $f_\text{text}$：**文本/step 内在难度**。跨任意异构 LM（0.5B → 14B，Qwen2.5 → Qwen3，Instruct → base）step 排序 Spearman ≥ 0.89（C.1 Q1）/ 跨 ckpt traj 排序 ≥ 0.85（C.2 Q1）。**不随 scorer 变化。**
+- $g(\theta)$：**均值偏移**（base rate）。跨异构模型只占 2.4%，跨训练占 21.6%（训练主要是整体降 NLL）。**z-norm 或 $s_\theta - s_\text{ref}$ 可消除。**
+- $h(\theta, o_t)$：**scorer × step 交互**，唯一携带模型特异信息的成分。
+
+### 9.3 Outcome 信号只存在于 $h(\theta, o_t)$
+
+**Step 级，任何 base scorer（4 个异构模型 + 训练 base ckpt）AUC ≈ 0.5**：
+
+| scorer | succ/fail AUC | p | 证据 |
+|---|:-:|:-:|:-:|
+| Qwen2.5-0.5B-Instruct | 0.495 | 0.94 | C.1 Q3 |
+| Qwen2.5-7B-Instruct | 0.498 | 0.98 | C.1 Q3 |
+| Qwen3-8B-base | 0.483 | 0.78 | C.1 Q3 |
+| Qwen3-14B-base | 0.506 | 0.92 | C.1 Q3 |
+| Training base ckpt（traj 级） | 0.355 | 0.29 | C.2 Q2 |
+
+**4 个异构 base 模型 + 训练起点 base 的 raw $s_\theta$ 在 step/traj 级都不区分 succ/fail。outcome 信号与模型容量、代际、SFT 状态无关——它只能来自训练诱导的 drift。**
+
+**Traj 级，只有"固定 base ref 的累积 drift"携带强信号**：
+
+| signal | traj AUC | p | 证据 |
+|---|:-:|:-:|:-:|
+| $\Delta$(step50 − base) | 0.820 | 0.017 | C.2 Q3 |
+| $\Delta$(step100 − base) | 0.835 | 0.013 | C.2 Q3 |
+| $\Delta$(step150 − base) | **0.860** | **0.007** | C.2 Q3 |
+| $\Delta$(step75 − step50) | 0.640 | 0.31 | C.2 Q3b |
+| $\Delta$(step125 − step100) | 0.620 | 0.38 | C.2 Q3b |
+| $\Delta$(Qwen3-14B − Qwen2.5-7B) | 0.459 | — | C.1 Q4 |
+
+⭐ **固定 base ref → AUC 0.82+ 全部 p<0.05；consecutive ckpt、cross-model Δ 全部退化到噪声（0.46–0.71）。**
+
+→ $h(\theta, o_t)$ 的信息含量来自**累积训练偏移量**，不是**当前 drift 速度**，更不是**跨 scorer 容量差**。
+
+### 9.4 机制：训练 selectively 重构 fail 轨迹
+
+Rank stability 按 succ/fail 拆解（C.2 Q5）：
+
+| ckpt vs base | all | succ-only | fail-only |
+|---|:-:|:-:|:-:|
+| step 50 | 0.926 | 0.900 | 0.827 |
+| step 100 | 0.854 | **0.903** | **0.692** |
+| step 125 | 0.867 | **0.903** | **0.680** |
+| step 150 | 0.899 | 0.900 | 0.768 |
+
+训练对 succ 轨迹排序几乎不变（≈0.90），对 fail 轨迹排序在 step 100–125（v1 崩溃窗口）大幅重构（0.69）。结合 Δ 的均值（fail: −0.57 vs succ: −0.35, C.2 Q3），机制清晰：
+
+**训练对 fail 轨迹的 NLL 降得更多 → 抹平 base 本有的 −0.23 gap → AUC 从 0.355 趋近 0.510**（C.2 Q2）。
+
+§3.3 / §6.3 的"succ-fail gap 消失"不是信号失效，而是**训练主动消灭**了这个区分度。
+
+### 9.5 Ref model 的选择由证据强约束
+
+基于 §9.3，$\Delta S = s_\theta - s_\text{ref}$ 的有效性完全取决于 ref：
+
+| ref 类型 | traj AUC | 为什么 | 证据 |
+|---|:-:|---|:-:|
+| **固定 base model（训练起点）** | **0.82–0.86** | 捕获累积训练偏移 | C.2 Q3 |
+| Moving ref（上一个 ckpt） | 0.46–0.71 | 只剩局部速度，几无 outcome 信号 | C.2 Q3b |
+| 跨模型 ref（其他 scale/代际） | 0.46–0.54 | 不同模型间无共享 drift 方向 | C.1 Q4 |
+
+**必要条件**：ref 必须是**同一训练起点的 frozen base**。任何 on-policy moving ref 或跨模型 ref 都不工作。这直接反驳"用更大模型做 ref 可以增强信号"的直觉。
+
+### 9.6 其他已验证性质（原 §9.2 表格保留）
+
+| # | 性质 | 证据 |
+|:-:|------|:-:|
+| 1 | Raw $s_\theta$ step-level 预测力 ≈ 0（corr +0.01, AUC 0.55） | §4.2 |
+| 2 | $\Delta S$（固定 base ref）长度 partial-out 后 traj AUC 0.77, 前 5 步 0.73 | §4.2, §4.4 |
+| 3 | $\Delta S$ 冷启动极慢（within-traj std 0.005 @step1），对数增长至 0.655 @step150 | §2.1 |
+| 4 | $\Delta S ⟂ $ action entropy（corr −0.12）；$\Delta S ⟂ $ wm_s_B | §4.2 |
+| 5 | H2 推翻：$\Delta S$ consecutive 高点 useful% 反更高（45.8 vs 36.2），stuck 无差 | §4.6 |
+| 6 | Obs NLL 训练中 U 型：2.061 → 1.550 @step100 → 1.601 @step150，与崩溃同步 | §6.2 |
+| 7 | Per-task 方向异质：heat/examine 上 OCAR +，clean 类 −15.1 pp | §3.1, §3.2 |
+| 8 | Canary 语义敏感性随 scale 升（Qwen2.5-Inst: 0.20→0.22；Qwen3-base: 0.23→0.26），与 succ/fail AUC 脱节 | §11.2, C.1 Q7 |
+
+### 9.7 本质刻画（综合所有证据）
+
+> **$\Delta S$ 相对 frozen base 是"θ 的累积训练偏移在 obs token 上的投影"，占 $s_\theta$ 总方差约 4 %。它通过 ref 减法消除 $f_\text{text}$（74–88 %）和 $g(\theta)$ 的均值偏移（21.6 %），保留唯一携带 outcome 信号的 $h(\theta, o_t)$。该成分"稀薄但有力"：traj 级 AUC 0.82+，step 级 ≈ 0.5。机制上来源于训练对 fail 轨迹的 selective 重构（§9.4），不是模型容量、代际或 SFT 状态。**
+
+此刻画**统一解释所有观察，无需额外假设**：
+
+- Raw $s_\theta$ 无用 ← $f_\text{text}$ 淹没 $h$
+- $\Delta S$（fixed base）有用 ← 隔离出 $h$
+- Moving / cross-model Δ 无用 ← 没有可累积的 drift
+- Step 级 AUC ≈ 0.5 ← $h$ 信号在 step 级只占 4%，需 traj 聚合
+- Succ/Fail gap 消失 ← 训练主动把 fail 的 $h$ 降得更多
+- 任务方向异质 ← $h$ 在不同文本族里方向不同
+
+### 9.8 优缺点汇总
+
+**优点**
+- 正交于 entropy / value（§4.2 corr −0.12）
+- 长度鲁棒（§4.4 partial-out 后仍有效）
+- 零额外模型（复用 LM head + frozen base ref）
+- z-norm 后幅度自稳（§5.2）
+
+**缺点**
+- 信号稀薄：step 级 4–10%，traj 级需聚合才能显现
+- 冷启动慢（§2.1），可用窗口 step 50–150
+- **不编码 reward**（§9.3 跨所有 base scorer AUC ≈ 0.5）
+- 任务方向偏差不可超参修复（§3.1, §3.2）
+- Succ/Fail 区分度随训练消失（§9.4）
+- 对 ref 选择极度敏感（§9.5）
+
+### 9.9 按证据分级的合理用法（修正）
+
+✅ **强证据（traj 级 + fixed base ref）**
+- **Trajectory-level reweighting**：把 $\Delta S_\text{traj-mean}$ 作为 outcome advantage 的 per-traj 权重（GRPO-style），比 OCAR v1 的 per-step softmax 更贴合信号 AUC 的实际分布
+- **Dual-token** 把 obs NLL 作为 auxiliary loss，本质等价于选择性强化 $h(\theta, o_t)$ —— 与证据方向一致
+
+⚠️ **中等证据**
+- Per-step reweighting（OCAR v3: z-norm + softmax）：仅限 heat/examine 等高交互任务族，且必须配合 fixed base ref
+- 早期失败预测器（前 5 步 AUC 0.73, §4.4）→ early-stop / curriculum
+
+❌ **不支持（有反证）**
+- Raw $s_\theta$ 的任何直接使用（§9.3）
+- Moving ref 的 $\Delta S$（§9.5）
+- 跨模型 Δ（§9.5）
+- Step 级通用 credit assignment（§9.3 跨 4 异构模型证伪）
+- Isolated/consecutive 规则做 stuck 检测（§4.6）
+- 声称反映 "world model quality"（U 型 + 无独立 WM）
+- 声称"base model scale 提升信号有效性"（§9.3 AUC 全部 ≈ 0.5）
+
+### 9.10 对论文叙事的影响（修正后核心 claim）
+
+> **实证层面**：obs-NLL surprise 在 step 级几乎不携带 outcome 信号（AUC ≈ 0.5，跨 4 异构 base 模型 + 2 环境验证）；outcome 信号只存在于"训练诱导 drift"分量里，占总方差约 3.9 %，但在 traj 级（ALFWorld）达 AUC 0.82+（p < 0.05）。
+>
+> **对 paper 主推方法（dual-token = GRPO + obs NLL aux loss）的含义**：
+>
+> 1. **Dual-token 的合理性来自 "observation-grounded language modeling"，不是 "surprise as credit"** ——这是最诚实的 framing（§0.1）。raw $s_\theta$ 不是 outcome 信号，但 "在 obs tokens 上保留 LM 监督" 本身就是防 policy drift 的独立动机，不需要 $s_\theta$ 有 outcome 信息。
+> 2. **Dual-token 的 loss 恰好选择性放大 $h(\theta, o_t)$ 那 3.9 %** ——这是**事后解释**，不是 design motivation。
+> 3. **Ref model 必须 frozen base**（§9.5）——dual-token 的 KL/ref 也默认这么做，一致。
+> 4. **Base model 容量 / 代际 / SFT 状态不会"自动"让 surprise 成为 outcome 信号** ——这是训练动态独有现象。
+>
+> **已撤回的 claim**：
+> - ❌ "OCAR 做通用 per-step credit assignment"（§3.3 + §9.3 反证）
+> - ❌ "surprise density 作 intrinsic reward"（§10 分析表明风险高）
+> - ❌ "更大模型会让方法更有效"（§9.3 跨 4 模型 AUC ≈ 0.5 反证）
+> - ❌ "wm_gap 是 7B 甜点"（§12.5/C.1 Q5 代际+SFT 混淆）
+>
+> **降级为"受 analysis 启发的未来工作"**（当前未做方法实验）：
+> - Trajectory-level reweighting（traj AUC 0.82 暗示可行，但**未做对照训练**）
+> - $\Delta S$ drift rate 作 dual-token env-compatibility 诊断器（§12 暗示可行，但**未形式化**）
+
+---
+
+## 10. Surprise 密集程度作为 Reward 的可行性（2026-04-19）
+
+> 问题：$\Delta S$（或其密集程度）的连续出现次数可否作为 intrinsic reward 加入 RL？
+
+### 10.1 现有证据能支持什么
+
+§4.5–4.6 的 step-level 分析里 **已经做了相关测试**，这里只摘取直接相关的数字：
+
+| 量 | 预测 useful-exploration AUC | 预测 stuck AUC |
+|---|---|---|
+| `delta_s`（单步值） | 0.58 | 0.48 |
+| `ema_delta_s`（λ=0.5，密集度代理） | **0.59** | 0.48 |
+| `win3_delta_s`（3 步均值，密集度代理） | **0.59** | 0.48 |
+| `sustained_pos_delta`（过去3步 >0 的计数） | 0.55 | 0.49 |
+| `d_delta_s`（时间差分） | 0.49 | 0.52 |
+
+- $\Delta S$ 的密集度（EMA / win3）对"未来 3 步出现 ≥3 新 obs token"的预测有**微弱正向信号（AUC ≈ 0.59）**
+- 对 stuck 几乎没有预测力（AUC ≈ 0.48–0.49）
+- Raw $s_\theta$ 的密集度（§4.6）consec 高反而 **stuck% 增**（17.1% vs 12.7%），与 $\Delta S$ 方向相反
+
+### 10.2 作为 reward 的 4 个风险（基于已有证据）
+
+1. **"Useful" label 本身是本地启发式**（"3 新 obs token in next 3 steps"），AUC 0.59 说明 $\Delta S$ 密集度**只解释 label 的极小方差**。把它当 reward 相当于直接优化这个启发式，**和最终 success 的关系未经证实**。
+2. **Reward hacking 直接可达**：agent 只需做**能翻出新 obs 文本但对任务无用**的动作（e.g. 反复 `examine`、`open/close` 不同 receptacle），就能刷高 $\Delta S$ 密集度。§4.7 已有定性案例：fail traj `f4c9dacf` 在 countertop 间来回 → consec $\Delta S$ 高但任务失败。
+3. **非平稳**：$\Delta S$ 幅度随训练对数增长（§2.1），密集度阈值会漂移；stdize 后幅度没了但语义也没了（z-norm 让所有轨迹内同分布，"密集"变成相对概念）。
+4. **Succ/Fail 同形**（§3.3, §6.2）：密集度在成功与失败轨迹里分布几乎一致，意味着"密集 = 好"在群体上没有证据。
+
+### 10.3 和已知 intrinsic reward 的关系
+
+$\Delta S$ 密集度本质接近 **prediction-error based curiosity**（ICM/RND 的文本域等价），区别只在于：这里的"prediction error"是 $\log \pi_\theta / \pi_{\text{ref}}$ 而非独立学习的 forward model。ICM 系列的已知结论完全适用——**容易 reward hack，对 task success 增益敏感地依赖环境结构**。ALFWorld 充满"能翻新文本但无用"的动作（examine / open 柜子），是这类 reward 的高风险环境。
+
+### 10.4 如果仍要尝试，最保守的设计
+
+按证据等级排序：
+
+1. **首选：不加 reward，加 loss anchor / advantage weight**——这是 dual-token 和 OCAR v3 的现路径，避免策略梯度直接最大化 $\Delta S$。
+2. **次选：用作 potential-based shaping**（$F(s,a,s') = \gamma\phi(s') - \phi(s)$，$\phi$ = 某种累计密集度）。potential-based shaping 有**理论保证不改变最优策略**，这是唯一能防御 reward hacking 的加法结构。
+3. **仅探索：小权重的 intrinsic bonus**，必须满足：
+   - 用 **$\Delta S$ 而非 raw $s_\theta$**（raw 会鼓励 stuck，§4.6）
+   - **在 episode 级 z-norm**（防尺度漂移）
+   - **在 outcome reward 非零时权重衰减到 0**（避免覆盖 task reward）
+   - **无独立消融的情况下，不要作为核心 claim**
+
+### 10.5 推荐实验（如果做）
+
+| # | 实验 | 目的 | 优先级 |
+|:-:|------|------|:-----:|
+| a | GRPO + win3(z-norm ΔS) bonus, weight ∈ {0.01, 0.05, 0.1} | 边际增益是否超噪声 | 中 |
+| b | 同 a 但 bonus 在 success 时衰减到 0 | 能否避免 reward hacking | 中 |
+| c | Potential-based shaping with φ = cumulative $\Delta S$ | 理论安全的加入 | 低（改动大） |
+| d | **对照**：GRPO + win3(ent_mean) bonus | 排除"任何内在奖励都涨"的可能 | 中 |
+
+### 10.6 结论
+
+- **证据只支持** $\Delta S$ **密集度是一个微弱的"useful exploration"相关物（AUC 0.59）**，不支持它反映 stuck 或任务成功。
+- **直接作为 reward 风险高**（reward hacking + 非平稳 + succ/fail 同形）。
+- **推荐继续走 loss/advantage 路线**（OCAR v3 / dual-token），这两者已有更强的直接证据支撑。
+- 如要作为 intrinsic reward 的 paper 方向，**必须先在 10.5(a,b,d) 里过消融**，且核心 claim 要限定为"在特定任务族内的 marginal gain"，而非通用探索奖励。
+
+---
+
+## 11. 后台实验结果（2026-04-19）
+
+### 11.1 Extra-seed eval（24 runs）
+
+**Phase A（t=0.7，已有协议，3 new seeds）**
+
+| 方法 / step | 42 | 2024 | 7 | mean ± std |
+|---|:-:|:-:|:-:|:-:|
+| observe step120 | 0.797 | 0.852 | 0.789 | **0.813 ± 0.028** |
+| observe step140 | 0.820 | 0.852 | 0.773 | **0.815 ± 0.033** |
+| dual step140 | 0.820 | 0.828 | 0.781 | **0.810 ± 0.021** |
+| dual step150 | 0.820 | 0.812 | 0.789 | **0.807 ± 0.016** |
+
+**Phase B（t=0.4，GiGPO paper-config，6 seeds）**
+
+| 方法 / step | 123 | 456 | 789 | 42 | 2024 | 7 | **mean ± std** |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| observe step120 | 0.867 | 0.781 | 0.734 | 0.766 | 0.836 | 0.758 | **0.790 ± 0.048** |
+| dual step150 | 0.875 | 0.789 | 0.750 | 0.781 | 0.844 | 0.805 | **0.807 ± 0.044** |
+
+**关键对比**：
+
+| 对比 | mean diff | 显著性 |
+|---|:-:|:-:|
+| dual vs observe @ t=0.4 (6 seeds) | +1.7pp | Welch t≈0.6, p≈0.55 **未显著** |
+| observe t=0.4 vs t=0.7 | **−2.3pp**（低温反降） | — |
+| dual t=0.4 vs t=0.7 | 0.0pp | — |
+
+**与 GiGPO 论文对标（t=0.4 协议）**：
+
+| 方法 | GiGPO 论文 | 我们 | gap |
+|---|:-:|:-:|:-:|
+| GRPO 类 baseline | 77.6% | observe **79.0%** | +1.4pp（复现成功） |
+| GiGPO | 90.8% | dual **80.7%** | **−10.1pp** |
+
+→ **dual-token 在 6-seed paper-config 评估下未显著超过 observe 基线，且与 GiGPO 主方法还有 10pp 差距。**
+
+### 11.2 Canary probe（5 模型）
+
+衡量 LM 对"原文 / 词序打乱 / 邻词交换 / 乱码 / 通用文本"的 NLL 变化——验证 obs NLL 是否对语义敏感。
+
+| 模型 | orig | shuffled | swapped | nonsense | generic |
+|---|:-:|:-:|:-:|:-:|:-:|
+| Qwen2.5-0.5B | 2.809 | 2.832 | 2.943 | 2.990 | 3.073 |
+| Qwen2.5-7B-Instruct | 2.887 | 2.937 | 3.066 | 3.144 | 2.810 |
+| Qwen3-8B | 2.768 | 2.837 | 2.889 | 2.998 | 2.874 |
+| Qwen3-14B | 2.723 | 2.812 | 2.893 | 3.008 | 2.879 |
+| Qwen3-0.6B | ❌ 模型文件缺失 |
+
+**观察**：nonsense − orig gap 在 7B-Instruct 最大（+0.257），在 14B 其次（+0.285），在 0.5B 最小（+0.181）——**结构敏感性随 scale 单调提升，但 0.5B 已有非零区分度。**
+
+### 11.3 Scale scan（4 模型 × 12 traj）
+
+| 模型 | obs_nll_last | wm_A P(o\|ctx,a) | wm_B P(o\|a) | **wm_gap** | succ-fail gap |
+|---|:-:|:-:|:-:|:-:|:-:|
+| Qwen2.5-0.5B | 2.013 | 3.419 | 3.838 | 0.420 | 0.077 |
+| **Qwen2.5-7B-Instruct** | **1.793** | 4.185 | 5.093 | **0.908** | 0.119 |
+| Qwen3-8B | 2.584 | 4.591 | 5.070 | 0.479 | 0.222 |
+| Qwen3-14B | 2.361 | 4.839 | 4.893 | **0.055** | 0.240 |
+
+**关键发现**：
+1. **wm_gap（P(o\|a) − P(o\|ctx,a)）在 7B-Instruct 最大**（0.908）——这是"上下文对 obs 预测的边际贡献"最显著的 scale，也是我们训练的 base model。
+2. **14B 的 wm_gap 几乎为 0**（0.055）——大模型已内化 env dynamics，context 不再增益。**这预示 dual-token / OCAR 在更大模型上边际收益会显著下降。**
+3. **succ-fail obs_nll gap 随 scale 增**（0.077 → 0.119 → 0.222 → 0.240）——但这里 n=12 太小，只能作为信号参考。
+
+### 11.4 A1/A2 decoupling（observe_lmlyvpa6）
+
+- **CCF argmax**：lag=−24，ccf=+0.573 → obs 信号滞后 SR ~24 step（领先关系的另一面）
+- **Stage-wise SR ~ obs_s_theta**：early R²=0.35，mid/late R² ≈ 0.05 → **相关性集中在训练早期**
+- Spearman of delta_s_mean vs SR = +0.496（global levels）
+
+---
+
+## 12. Webshop 跨环境对照（**GRPO baseline + 仪表盘**, 2026-04-19）
+
+> **⚠️ 身份澄清（见 §0.2）**：本节的 `grpo_observe_webshop_20260418_070828/42rxhh6f` 是**纯 GRPO + observe 指标仪表盘**，**不参与梯度**。因此本节**不是 dual-token 方法的跨域验证**，仅是"纯 GRPO 在 webshop 上 obs NLL 这些指标会长什么样"的仪表盘对照。Dual-token 在 webshop 上的方法实验**尚未进行**。
+>
+> 分析脚本：`ocar/analysis/webshop_surprise.py`；源 CSV：`ocar/analysis_results/webshop/history_full.csv`（31 个日志点，每 20 step 一次，state=running 640/659）。
+
+### 12.1 训练轨迹概览（纯 GRPO）
+
+| stage | step | s_θ | Δ S | Δ S_std | SR | val_SR |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| early | 20–200 | 2.19 | −0.164 | 0.198 | 0.33 | 0.39 |
+| mid | 220–420 | 2.15 | −0.130 | 0.211 | 0.59 | 0.63 |
+| late | 440–640 | 2.24 | −0.132 | 0.205 | 0.61 | 0.68 |
+
+### 12.2 obs-NLL 信号形态对比（ALFWorld vs Webshop, 均为仪表盘）
+
+| 现象 | ALFWorld | Webshop | 差异解读 |
+|---|---|---|---|
+| Raw $s_\theta$ 量级 | 训练中 1.55–2.10 | 全程 1.80–2.57 | webshop 商品文本更难 |
+| Raw $s_\theta$ U 型 | 2.06 → 1.55 @ step100 → 1.60 @ step150 | 2.37 → 1.80 @ step240 → 2.30 @ step640 | ✅ 两域都有 U 型 |
+| $\Delta S$ 累积幅度 | 训练中 −0.11 → +0.05（→ 150 step 跨度大） | 全程 −0.08 ~ −0.21（**不累积**） | θ 对 ref 的偏移在 webshop 上没积起来 |
+| Within-batch succ/fail $s_\theta$ gap | base −0.227 → step150 −0.01（抹平） | early +0.007 → late −0.079（反向） | 机制环境相关，不普适 |
+
+**$\Delta S$ 不累积是最重要的观察**：与 §9.5 的 "Δ S 信号依赖 θ 相对 frozen base 的累积偏移" 一致——webshop 训练实际推动 θ 偏离 ref 的幅度本就小（Qwen 对商品文本预训练近），所以**obs NLL auxiliary loss 在 webshop 上预期也会更弱**。这是一条关于"方法适用性"的可观测前置条件。
+
+### 12.3 Training-level Spearman（n=31，**仅描述性，不作信号 claim**）
+
+| signal | Webshop vs SR | ALFWorld vs SR | 评语 |
+|---|:-:|:-:|---|
+| raw $s_\theta$ | −0.057 (p=0.76) | +0.320 (p=0.08) | 两侧都弱/零——与 §9.3 step-level AUC≈0.5 一致 |
+| $\Delta S$ | +0.139 (p=0.46) | +0.722 (p<0.0001) | ALFWorld 强，webshop 无；印证 §12.2 累积假设 |
+| `consec_s` | **−0.664** (p<0.0001) | **+0.691** (p<0.0001) | **方向相反** |
+| `wm_s_B` | −0.534 (p=0.002) | −0.036 (p=0.85) | 环境特异 |
+| `wm_s` | −0.431 (p=0.015) | +0.077 (p=0.69) | 环境特异 |
+| step_entropy | +0.285 (p=0.12) | +0.118 (p=0.53) | 两侧都弱 |
+
+### 12.4 关于这些 Spearman 的 3 个重要警告
+
+1. **时间耦合主导**：SR 随训练 step 单调涨；$s_\theta$ / $\Delta S$ / `consec_s` 也各自随 step 单调漂移（方向由环境 obs 文本生成结构决定）。**Spearman 主要捕捉的是"两条曲线随训练同向还是反向"，不是"当前 batch 内信号能预测成败"**。后者需要 within-batch 或去趋势残差相关，**本日志未做**。
+2. **`consec_s` = $s_\theta(o_t) - s_\theta(o_{t-1})$**（同轨迹相邻步差分，[ocar/surprise_observer.py#L160](ocar/surprise_observer.py#L160-L182)）。两环境符号相反是 obs 文本结构差异的产物（ALFWorld 后期 obs 更 diverse → NLL 递增；webshop 后期更套路化 → NLL 递减），**不是** "consec_s 能预测 stuck"。
+3. **n=31 点**，95% CI 宽约 ±0.3；除非 bootstrap 后仍显著，否则不作 paper 级 claim。
+
+### 12.5 仍然稳健的跨环境发现（**唯一可 paper 化的部分**）
+
+| 结论 | ALFWorld | Webshop | 与 §9 关系 |
+|---|:-:|:-:|---|
+| ✅ Raw $s_\theta$ 与 SR 无/弱相关 | +0.32 (p=0.08) | −0.06 (p=0.76) | 直接验证 §9.3 的 step-level 不编码 outcome |
+| ✅ Obs NLL U 型 | ✓ | ✓ | 均与训练 uniform drift 成分 ($g(\theta)$, §9.2) 一致 |
+
+**所有其他"跨域模式"都是环境特异 artefact**。
+
+### 12.6 对 dual-token 方法叙事的启示
+
+> 本节**不能**证伪 dual-token，因为未跑 method 实验。但给出两条**方法适用性的可观测前提**：
+>
+> 1. **$\Delta S$ 累积性**：若训练中 $|E[\Delta S]|$ 不随 step 增长（如 webshop 所示），说明 θ 相对 ref 没有真正偏离——此时 obs NLL aux loss 的"放大 $h(\theta,o_t)$"机制无东西可放大，预期收益小。
+> 2. **Obs NLL 量级差**：webshop 的 $s_\theta$ 起点高（2.4）且 U 型振幅大（0.76 vs ALFWorld 0.50），说明 obs 文本本身更难——aux loss 的 gradient 反而可能主导训练，需要重新调权重。
+>
+> **下一步待做**：在 webshop 上跑 dual-token，对照此处的 GRPO baseline；若 SR 超过 GRPO，则"dual-token 跨域"成立，method section 两环境覆盖；若不超过，则把 webshop 写成 "dual-token 适用性由 $\Delta S$ drift rate 决定" 的**限定性证据**。
+
+---
+
+## Appendix C: 跨模型 / 训练动态原始数据表（2026-04-19）
+
+> §9 的第一性原理结论都从下表导出。数值均由 `ocar/analysis/cross_scale_surprise.py` 与 `ocar/analysis/training_dynamics_decomp.py` 在 2026-04-19 复跑逐位复现；底层 JSON：`ocar/analysis_results/scale_scan/*.json`（4 模型 × 12 同一轨迹 × 同一 step lens = 93 step, 6 succ + 6 fail）、`ocar/wm_degradation_results.json`（6 ckpt × 20 同一 traj, 10 succ + 10 fail）。所有 scorer 共享完全一致的轨迹/step 集。
+
+---
+
+### C.1 Cross-model inference（4 异构 Qwen × 93 step）
+
+**⚠️ 变量混淆声明**：4 模型同时变 scale、代际、SFT 状态，**不是**纯 scale scan；C.1 Q5–Q7 的跨族趋势不可单独归因于 scale。
+
+| 模型 | 代际 | Instruct? | 参数 |
+|---|:-:|:-:|:-:|
+| Qwen2.5-0.5B-Instruct | 2.5 | ✅ | 0.5B |
+| Qwen2.5-7B-Instruct | 2.5 | ✅ | 7B |
+| Qwen3-8B | 3 | ❌ base | 8B |
+| Qwen3-14B | 3 | ❌ base | 14B |
+
+**Q1 跨模型 Spearman（per-step, n=93）**
+
+| | 0.5B-Inst | 7B-Inst | 8B-base | 14B-base |
+|---|:-:|:-:|:-:|:-:|
+| 0.5B-Inst | 1.00 | **0.89** | 0.96 | 0.96 |
+| 7B-Inst | 0.89 | 1.00 | 0.90 | 0.90 |
+| 8B-base | 0.96 | 0.90 | 1.00 | **0.97** |
+| 14B-base | 0.96 | 0.90 | 0.97 | 1.00 |
+
+所有 pair ≥ 0.89 → $f_\text{text}$ 跨异构 LM 一致（§9.2）。
+
+**Q2 方差分解（total SS = 1443.7）**
+
+| 来源 | SS | % |
+|---|:-:|:-:|
+| between-step | 1264.4 | **87.6 %** |
+| model × step 交互 | 144.7 | 10.0 % |
+| between-model | 34.7 | 2.4 % |
+
+**Q3 Per-model succ/fail AUC（step 级, n=45 succ + 48 fail, label = traj outcome）**
+
+| 模型 | succ mean | fail mean | gap | AUC | p |
+|---|:-:|:-:|:-:|:-:|:-:|
+| 0.5B-Inst | 2.05 | 1.98 | +0.08 | 0.495 | 0.94 |
+| 7B-Inst | 1.85 | 1.74 | +0.12 | 0.498 | 0.98 |
+| 8B-base | 2.70 | 2.48 | +0.22 | 0.483 | 0.78 |
+| 14B-base | 2.48 | 2.25 | +0.24 | 0.506 | 0.92 |
+
+**Q4 Cross-model Δ（query − ref）作为去 base rate 的 surprise**
+
+| Δ | succ-fail gap | AUC | raw-query AUC |
+|---|:-:|:-:|:-:|
+| 7B-Inst − 0.5B-Inst（同族） | +0.04 | 0.543 | 0.498 |
+| 14B-base − 0.5B-Inst（跨族） | +0.16 | 0.495 | 0.506 |
+| 14B-base − 7B-Inst（跨族） | +0.12 | **0.459** | 0.506 |
+
+**Q5 wm_gap = P(o│a) − P(o│ctx,a)**（⚠️ 受代际/SFT 混淆，不单调）
+
+| 模型 | wm_gap |
+|---|:-:|
+| Qwen2.5-0.5B-Inst | +0.42 |
+| Qwen2.5-7B-Inst | **+0.91** |
+| Qwen3-8B | +0.48 |
+| Qwen3-14B | **+0.05** |
+
+2.5-Inst 族内 0.42→0.91（升）；Qwen3-base 族内 0.48→0.05（降）。跨族不可直接比。**撤回原"14B gap=0 归因于 scale"的 claim**；要做纯 scale 需再补 Qwen3-0.6B/1.7B 或 Qwen2.5-14B-Inst。
+
+**Q6 within-traj std**（⚠️ base vs Instruct 断层）
+
+| 模型 | within-traj std |
+|---|:-:|
+| 0.5B-Inst | 1.17 |
+| 7B-Inst | 1.27 |
+| 8B-base | 2.18 |
+| 14B-base | 1.85 |
+
+**Q7 Canary nonsense − orig NLL gap**（⚠️ 分族看）
+
+| 模型 | nons − orig |
+|---|:-:|
+| Qwen2.5-0.5B-Inst | +0.198 |
+| Qwen2.5-7B-Inst | +0.220 |
+| Qwen3-8B | +0.227 |
+| Qwen3-14B | +0.255 |
+
+两族各自 scale 方向都是正的（+0.022 / +0.028），但跨族绝对值差混合了代际/SFT。**语义敏感性（Q7）单调 ≠ outcome AUC（Q3 全 ≈ 0.5）**——"懂文本" ≠ "能预测任务成功"。
+
+---
+
+### C.2 Training-dynamics decomposition（6 ckpt × 20 traj）
+
+**Q1 Cross-checkpoint Spearman（per-traj obs_nll, n=20）**
+
+| | base | step50 | step75 | step100 | step125 | step150 |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| base | 1.000 | 0.926 | 0.905 | 0.854 | 0.867 | 0.899 |
+| step50 | | 1.000 | 0.988 | 0.960 | 0.970 | 0.982 |
+| step75 | | | 1.000 | 0.979 | 0.986 | 0.991 |
+| step100 | | | | 1.000 | 0.988 | 0.969 |
+| step125 | | | | | 1.000 | 0.983 |
+
+base → step100 的 0.854 是最大的 rank 重排（§9.4）。
+
+**Q2 Per-checkpoint succ/fail AUC（traj 级, n=10+10）**
+
+| ckpt | succ mean | fail mean | gap | AUC | p |
+|---|:-:|:-:|:-:|:-:|:-:|
+| **base** | 1.947 | 2.174 | **−0.227** | **0.355** | 0.29 |
+| step50 | 1.571 | 1.639 | −0.068 | 0.440 | 0.68 |
+| step75 | 1.595 | 1.648 | −0.054 | 0.470 | 0.85 |
+| step100 | 1.543 | 1.558 | −0.015 | 0.510 | 0.97 |
+| step125 | 1.577 | 1.583 | −0.006 | 0.485 | 0.94 |
+| step150 | 1.594 | 1.608 | −0.014 | 0.465 | 0.82 |
+
+**Q3 Δ(step_k − base) —— 累积训练 drift（核心信号源）**
+
+| Δ | mean | succ mean | fail mean | gap | AUC | p |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| step50 − base | −0.455 | −0.376 | −0.535 | +0.159 | **0.820** | **0.017** |
+| step75 − base | −0.439 | −0.352 | −0.526 | +0.173 | 0.810 | 0.021 |
+| step100 − base | −0.510 | −0.404 | −0.616 | +0.213 | 0.835 | 0.013 |
+| step125 − base | −0.481 | −0.370 | −0.591 | +0.221 | 0.845 | 0.010 |
+| step150 − base | −0.460 | −0.353 | −0.566 | +0.213 | **0.860** | **0.007** |
+
+**Q3b Δ(step_k − step_{k-1}) —— 连续 ckpt drift（信号几乎消失）**
+
+| Δ | gap | AUC | p |
+|---|:-:|:-:|:-:|
+| step50 − base | +0.159 | 0.820 | 0.017 |
+| step75 − step50 | +0.014 | 0.640 | 0.31 |
+| step100 − step75 | +0.039 | 0.705 | 0.13 |
+| step125 − step100 | +0.009 | 0.620 | 0.38 |
+| step150 − step125 | −0.008 | 0.455 | 0.76 |
+
+→ **信号几乎全部集中在"base → step50"首段累积量**，其后连续 drift 无 outcome 信息（§9.5）。
+
+**Q4 方差分解（total SS = 17.25）**
+
+| 来源 | SS | % |
+|---|:-:|:-:|
+| between-traj | 12.85 | **74.5 %** |
+| between-ckpt | 3.73 | 21.6 % |
+| traj × ckpt | 0.67 | **3.9 %** |
+
+**Q5 Rank stability 按 succ/fail 拆解**
+
+| ckpt vs base | all | succ-only | fail-only |
+|---|:-:|:-:|:-:|
+| step50 | 0.926 | 0.900 | 0.827 |
+| step75 | 0.905 | 0.879 | 0.806 |
+| **step100** | 0.854 | **0.903** | **0.692** |
+| **step125** | 0.867 | **0.903** | **0.680** |
+| step150 | 0.899 | 0.900 | 0.768 |
+
+Succ 轨迹排序恒定（≈0.90），fail 轨迹在 step 100–125 大幅重构（0.69）——§9.4 机制来源。
+
+---
+
+### C.3 数据完整性核查（2026-04-19 复跑）
+
+- **C.1**：4 模型评分的 `traj_ids = [0..11]`、per-traj step lens = `[8,8,6,7,8×9]`、success flags 完全一致 → 93 step / 45 succ-step / 48 fail-step。
+- **C.2**：6 ckpt 的 `traj_id` 集合完全一致，同 20 traj / 10 succ + 10 fail。
+- 两脚本输出的所有数字与本附录表格**逐位复现**。
+
+
+**小字注**：C.2 n=20 使 AUC 0.82+ 的 95% CI 较宽；若论文需硬性 CI，建议补一次 1000-bootstrap。C.1 step-level Mann-Whitney 以 traj outcome 作 step-label，引入 step 间相关性 → p 值偏乐观；但 4 个 AUC 全在 0.483–0.506，定性结论（step 级不区分 succ/fail）不会被这点偏差翻转。
+
+---
+
+## 13. Entropy × Surprise 双信号联合分析（2026-04-19）
+
+> **三个 wandb run 的联合挖掘**：ALFW GRPO+observe (`lmlyvpa6`, n=30 log steps, step 5–150)、Webshop GRPO+observe (`42rxhh6f`, n=31, step 20–640)、ALFW dual-token (`l49ikuco`, n=150, step 1–150)。脚本：[ocar/analysis/entropy_surprise_joint.py](ocar/analysis/entropy_surprise_joint.py)；原始报告：[ocar/analysis_results/entropy_surprise/report.md](ocar/analysis_results/entropy_surprise/report.md) + `overview.png`。
+>
+> **TL;DR**：(1) action entropy 是比 obs-NLL 更强、更早、更稳的 within-batch outcome 信号；(2) dual-token 在 train SR 上输给 pure GRPO+observe（0.71 vs 0.84），但在 val SR 上反超（0.81 vs 0.81，末点 0.88 vs 0.80），且 entropy 被系统压低——揭示 **wm loss ≈ 隐藏的 entropy regularizer** 的新解释；(3) 全新现象 "residual hardness"：随 SR 升高，fail 轨迹的 entropy 发散（ρ(SR, ent_gap)=+0.655, p<1e-19），与 §9.4 selective reconstruction 是同一机制的 entropy 面。
+
+### 13.1 Entropy 是比 ΔS 更强的 within-batch outcome 信号
+
+dual-token n=150 log step 内，`fail_ent − succ_ent` 恒正，**P(f>s)=1.000**：
+
+| signal | mean gap | P(f>s) | t | p | 数据 |
+|---|:-:|:-:|:-:|:-:|:-:|
+| `fail_ent − succ_ent`（ALFW dual） | **+0.452** | **1.000** | **17.24** | **2.5e-37** | report Q2 |
+| `fail_s_θ − succ_s_θ`（ALFW dual） | +0.021 | 0.513 | 2.06 | 0.041 | report Q2 |
+| `fail_ent − succ_ent`（Webshop obs） | +0.093 | 0.871 | 6.95 | 1e-07 | report Q2 |
+| `fail_s_θ − succ_s_θ`（Webshop obs） | +0.083 | 0.613 | 1.96 | 0.059 | report Q2 |
+
+**早期可用性（cumulative t-test over first k steps, ALFW dual）**：
+
+| first k | mean gap | t | p |
+|---|:-:|:-:|:-:|
+| 5 | +0.060 | 5.80 | 4e-3 |
+| 10 | +0.063 | 11.09 | 2e-6 |
+| 30 | +0.087 | 16.87 | 2e-16 |
+| 100 | +0.266 | 13.17 | 2e-23 |
+
+**entropy gap 在第 5 个 log step 就显著**，而 §C.2 的 ΔS traj-AUC 要 ckpt step 50 才到 0.82。**快 5–10 倍，且 step-level 就成立**——这是 §9 "surprise step-level AUC ≈ 0.5" 那条死线的旁路。
+
+含义：**paper_v6 的 dual-token 叙事需要主动回应"为什么不用 entropy"**——后者是更强的 observation-derived outcome 信号候选（虽然严格说 entropy 是 policy-derived）。
+
+### 13.2 Dual-token vs pure-GRPO+observe 的 train/val 反转
+
+ALFW 同 step 网格（step 5–150，n=30 对照点）：
+
+| metric | GRPO+observe end3 | dual-token end3 | Δ(dt − obs) |
+|---|:-:|:-:|:-:|
+| **train SR** | **0.836** | 0.763 | **−0.073** |
+| **val SR** | 0.807 | **0.812** | +0.005 |
+| val SR 末点 | 0.797 | **0.883** | **+0.086** |
+| step_entropy | 0.882 | 0.758 | −0.124 |
+| s_θ | 2.193 | 1.942 | −0.251 |
+| wm_s | 3.822 | 3.100 | −0.722 |
+| ΔS | −0.005 | −0.356 | −0.351 |
+
+**观察结构化**：
+1. wm loss 把 s_θ 和 wm_s 明显压低（training objective 被满足）
+2. 附带把 step_entropy 在后半段压低 0.12–0.21
+3. 附带把 ΔS 压低——θ 偏离 ref 的 drift 被削弱
+4. **这四个一起出现，train SR 掉 7pp，但 val SR 没掉甚至涨** → wm loss 的净效应更像是 regularizer 而非单纯辅助学习信号
+
+**这是 paper_v6 §2 当前没有描述的一个 framing**。原 framing "observation-grounded LM 防 drift" 和新 framing "entropy regularizer" 目前**观测等价**——两者都预测 train drop + val stay。**需要一个 controlled ablation 才能分开**（见 §13.5 实验建议）。
+
+### 13.3 "Residual hardness"：fail 轨迹的 entropy 随训练放大
+
+ALFW dual-token，按训练进度四等分：
+
+| quartile | step range | ent_gap(f−s) | s_θ_gap(f−s) | SR |
+|---|:-:|:-:|:-:|:-:|
+| Q1 | 1–38 | +0.099 | +0.016 | 0.435 |
+| Q2 | 39–76 | +0.240 | +0.003 | 0.629 |
+| Q3 | 77–113 | **+0.638** | +0.031 | 0.659 |
+| Q4 | 114–150 | **+0.848** | +0.036 | 0.711 |
+
+ρ(SR, ent_gap) = **+0.655**, p = 9.6e-20, n=150。
+
+**解读**：训练早期 fail ≈ "随机失败"，entropy 不特别高；后期 SR 升 → 剩下的 fail 是 hard-residual（policy 本就无法 commit），entropy 自然高。这是 §9.4 "训练 selectively 重构 fail" 在 entropy 面的镜像——也是一个**全新的、未在 §9 刻画过的动态效应**。
+
+**对 §10 intrinsic-reward 分析的补充（第 5 条风险）**：任何用 "high-entropy" 或 "high-surprise fail" 做 credit assignment 的方法，**label 分布随训练漂移**——step 30 和 step 130 看到同样的"高 entropy fail step"，实际意义完全不同（前者是 noise，后者是 hard case）。reward hacking 之外的又一个非平稳性来源。
+
+### 13.4 Per-task 新观察（dual-token 独有）
+
+| task | SR_end5 | ent_end5 | s_θ_end5 | ρ(ent, SR) |
+|---|:-:|:-:|:-:|:-:|
+| heat | **1.000** | **0.110** | 1.702 | −0.806 |
+| examine | 0.900 | 0.499 | 2.013 | −0.792 |
+| pick_place | 0.837 | 0.646 | 2.021 | −0.681 |
+| cool | 0.811 | 0.632 | 1.623 | −0.727 |
+| clean | 0.796 | 0.773 | 1.717 | −0.489 |
+| **other** | **0.679** | **0.891** | 1.962 | **+0.124** |
+
+- **heat 是唯一 entropy 崩到 0.11 的任务**，也是 SR=1.0 的唯一任务——这是 §9.6 "OCAR 帮助 heat/examine" 的 entropy 面镜像（entropy 本就 converge 的任务族）。
+- **other 反向**：SR 上升同时 entropy 也上升。这是 §3.1/§3.2 "per-task 方向异质" 在 entropy 面的**第一次动态观察**——训练增强了 "other" 里 "能做的子集" 和 "完全搞不定的子集" 的两端分布，policy 看到 "other" prompt 时 entropy 反而变高。
+
+### 13.5 建议实验（按今晚可跑优先级）
+
+| # | 实验 | 目的 | 成本 |
+|:-:|---|---|:-:|
+| **A** | **GRPO + entropy bonus (β ∈ {0.005, 0.01, 0.02})**，同 6 seeds, paper-config | 分开 "wm loss = observation-grounded LM" vs "wm loss = entropy regularizer" 两种解释 | 同 dual-token 一轮 |
+| B | §C.2 20 traj × 6 ckpt 集上，以 traj-mean action entropy 做 scorer，跑 succ/fail AUC 和方差分解 | 回答 entropy 和 ΔS 是 orthogonal 还是 redundant（可能给 §9 刻画一个正交 verification） | 纯分析，~2h |
+| C | dual-token 在 webshop 上跑，对照 §12 pure GRPO baseline | paper_v6 最缺的跨环境方法实验；同时验 13.2 反转是否环境独立 | 一轮训练 |
+
+**实验 A 是最高优先级**：paper_v6 目前没有这个 ablation，审稿人 99% 会问；且 13.2 四个 entropy/s_θ/wm_s/ΔS 同时被 wm loss 压低的结构，使 entropy-bonus 对照不得不做。
+
+---
